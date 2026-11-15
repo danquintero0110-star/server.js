@@ -44,7 +44,7 @@ function serializeNote(n, { full = false } = {}) {
 }
 
 export function buildApp({ db, queue, logger = false }) {
-  const app = Fastify({ logger, bodyLimit: 1024 * 1024, trustProxy: true });
+  const app = Fastify({ logger, bodyLimit: 1024 * 1024, trustProxy: '127.0.0.1' });
   app.register(fastifyCookie);
   app.register(fastifyMultipart, { limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 1 } });
   app.register(fastifyStatic, {
@@ -59,8 +59,11 @@ export function buildApp({ db, queue, logger = false }) {
   const getNote = (id) => db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
 
   // --- Autenticación -------------------------------------------------------
-  app.addHook('preHandler', async (req, reply) => {
-    if (!req.url.startsWith('/api/') || req.url.startsWith('/api/health') || req.url.startsWith('/api/login')) return;
+  // Se decide con la ruta ya resuelta por el router (no con la URL cruda, que puede venir codificada).
+  const PUBLIC = new Set(['/api/health', '/api/login']);
+  app.addHook('onRequest', async (req, reply) => {
+    const route = req.routeOptions?.url;
+    if (!route || !route.startsWith('/api/') || PUBLIC.has(route)) return;
     const user = auth.sessionUser(db, req.cookies[auth.COOKIE]);
     if (!user) return reply.code(401).send({ error: 'Inicia sesión' });
     req.user = user;
@@ -168,7 +171,12 @@ export function buildApp({ db, queue, logger = false }) {
           }
           const ext = EXT[audioMime] || path.extname(part.filename || '').slice(1).replace(/[^a-z0-9]/gi, '') || 'bin';
           audioFile = `${id}.src.${ext}`;
-          await pump(part.file, fs.createWriteStream(path.join(audioDir(), audioFile)));
+          try {
+            await pump(part.file, fs.createWriteStream(path.join(audioDir(), audioFile)));
+          } catch (e) {
+            fs.rmSync(path.join(audioDir(), audioFile), { force: true });
+            throw e;
+          }
           if (part.file.truncated) {
             fs.rmSync(path.join(audioDir(), audioFile), { force: true });
             return reply.code(413).send({ error: `El archivo supera ${config.maxUploadMb} MB` });
@@ -196,7 +204,7 @@ export function buildApp({ db, queue, logger = false }) {
        VALUES (@id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, 'queued')`,
     ).run({ id, ...fields, sourceType, sourceUrl, audioFile, audioMime });
     indexNote(db, id);
-    queue.enqueue(id);
+    Promise.resolve(queue.enqueue(id)).catch((e) => req.log.error(e));
     return reply.code(201).send(serializeNote(getNote(id), { full: true }));
   });
 
@@ -225,7 +233,11 @@ export function buildApp({ db, queue, logger = false }) {
 
   app.delete('/api/notes/:id', async (req) => {
     const n = getNote(req.params.id);
-    if (n?.audio_file) fs.rmSync(path.join(audioDir(), n.audio_file), { force: true });
+    if (n) {
+      for (const f of fs.existsSync(audioDir()) ? fs.readdirSync(audioDir()) : []) {
+        if (f.startsWith(`${n.id}.`) || f.startsWith(`${n.id}-`)) fs.rmSync(path.join(audioDir(), f), { force: true });
+      }
+    }
     db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
     db.prepare('DELETE FROM notes_fts WHERE note_id = ?').run(req.params.id);
     return { ok: true };
@@ -238,7 +250,7 @@ export function buildApp({ db, queue, logger = false }) {
     db.prepare(
       `UPDATE notes SET status = 'queued', error = '', analysis_json = ''${fromScratch ? ", transcript_json = ''" : ''} WHERE id = ?`,
     ).run(n.id);
-    queue.enqueue(n.id);
+    Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
     return serializeNote(getNote(n.id), { full: true });
   });
 
@@ -320,9 +332,7 @@ export function buildApp({ db, queue, logger = false }) {
         ins.run(n.id, 'user', question);
         ins.run(n.id, 'assistant', out.text);
       })();
-      const cost = JSON.parse(n.cost_json || '{}');
-      cost.chat = Math.round(((cost.chat || 0) + out.costUsd) * 10000) / 10000;
-      db.prepare('UPDATE notes SET cost_json = ? WHERE id = ?').run(JSON.stringify(cost), n.id);
+      db.prepare("UPDATE notes SET cost_json = json_set(cost_json, '$.chat', round(coalesce(json_extract(cost_json, '$.chat'), 0) + ?, 4)) WHERE id = ?").run(out.costUsd, n.id);
       send('done', { text: out.text });
     } catch (e) {
       req.log.error(e);

@@ -19,7 +19,9 @@ die() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "Ejecuta con sudo."
 command -v node >/dev/null || die "Falta Node.js (>= 20)."
-[ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ] || die "Node.js debe ser >= 20."
+NODE=$(readlink -f "$(command -v node)")
+case "$NODE" in /root/*|/home/*) die "Node está en $NODE (nvm de un usuario); el servicio no puede usarlo. Instala Node del sistema (p. ej. /usr/bin/node).";; esac
+[ "$("$NODE" -p 'process.versions.node.split(".")[0]')" -ge 20 ] || die "Node.js debe ser >= 20."
 mkdir -p "$BK"
 
 # --- Dependencias del sistema (solo si faltan) ---------------------------------
@@ -52,7 +54,8 @@ OPENAI_API_KEY=
 EOF
   log "Creado $ENVF (puerto $PORT)"
 fi
-PORT=$(grep -E '^PORT=' "$ENVF" | cut -d= -f2)
+PORT=$(grep -E '^PORT=' "$ENVF" | cut -d= -f2 || true)
+[ -n "$PORT" ] || die "Falta PORT= en $ENVF"
 grep -qE '^ANTHROPIC_API_KEY=.+' "$ENVF" || log "AVISO: falta ANTHROPIC_API_KEY en $ENVF"
 grep -qE '^(DEEPGRAM|ELEVENLABS|OPENAI)_API_KEY=.+' "$ENVF" || log "AVISO: falta una llave de transcripción en $ENVF"
 
@@ -66,14 +69,14 @@ chown -R root:root "$REL"
 
 if [ -f "$DATA/selah.db" ]; then
   log "Respaldando base de datos antes de cambiar"
-  sudo -u selah SELAH_DATA_DIR="$DATA" SELAH_ENV_FILE=/nonexistent node "$REL/scripts/backup-db.js" "$DATA/backups" --keep 30 >/dev/null
+  sudo -u selah SELAH_DATA_DIR="$DATA" SELAH_ENV_FILE=/nonexistent "$NODE" "$REL/scripts/backup-db.js" "$DATA/backups" --keep 30 >/dev/null
 fi
 
 PREV=""; [ -L "$APP/current" ] && PREV=$(readlink -f "$APP/current")
-[ -n "$PREV" ] && echo "$PREV" > "$APP/.previous"
 ln -sfn "$REL" "$APP/current.new" && mv -T "$APP/current.new" "$APP/current"
 
-install -m 644 "$REL/deploy/selah.service" /etc/systemd/system/selah.service
+sed "s#/usr/bin/env node#$NODE#" "$REL/deploy/selah.service" > /etc/systemd/system/selah.service
+chmod 644 /etc/systemd/system/selah.service
 install -m 644 "$REL/deploy/selah-backup.service" /etc/systemd/system/selah-backup.service
 install -m 644 "$REL/deploy/selah-backup.timer" /etc/systemd/system/selah-backup.timer
 systemctl daemon-reload
@@ -86,9 +89,12 @@ ok=""
 for i in $(seq 1 20); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 1; done
 if [ -z "$ok" ]; then
   journalctl -u selah -n 30 --no-pager || true
-  if [ -n "$PREV" ]; then log "Falló: regresando a la versión anterior"; ln -sfn "$PREV" "$APP/current"; systemctl restart selah; fi
+  if [ -n "$PREV" ]; then log "Falló: regresando a la versión anterior"; ln -sfn "$PREV" "$APP/current"; systemctl restart selah
+  else systemctl disable --now selah >/dev/null 2>&1 || true; fi
   die "La nueva versión no respondió."
 fi
+# Solo una versión sana se vuelve "anterior" de la siguiente.
+[ -n "$PREV" ] && [ "$PREV" != "$REL" ] && echo "$PREV" > "$APP/.previous"
 
 # --- nginx + certificado (solo la primera vez) ---------------------------------
 if [ -d /etc/nginx/sites-available ]; then SITE=/etc/nginx/sites-available/$DOMAIN; LINK=/etc/nginx/sites-enabled/$DOMAIN
@@ -106,8 +112,10 @@ nginx_apply() { # $1 = plantilla
   local tmp; tmp=$(mktemp)
   render "$1" "$tmp"
   if [ -f "$SITE" ] && cmp -s "$tmp" "$SITE"; then rm -f "$tmp"; return 0; fi
-  tar -czf "$BK/nginx-$TS.tgz" -C / etc/nginx
-  log "Respaldo de nginx: $BK/nginx-$TS.tgz"
+  if [ ! -f "$BK/nginx-$TS.tgz" ]; then   # un respaldo por despliegue, tomado ANTES del primer cambio
+    tar -czf "$BK/nginx-$TS.tgz" -C / etc/nginx
+    log "Respaldo de nginx: $BK/nginx-$TS.tgz"
+  fi
   local had=""; [ -f "$SITE" ] && { cp -a "$SITE" "$SITE.bak-$TS"; had=1; }
   install -m 644 "$tmp" "$SITE"; rm -f "$tmp"
   [ -n "$LINK" ] && ln -sfn "$SITE" "$LINK"
@@ -132,6 +140,6 @@ nginx_apply "$REL/deploy/nginx-https.conf"
 # Limpieza: conserva las 5 versiones más recientes.
 ls -1dt "$APP"/releases/* | tail -n +6 | xargs -r rm -rf
 
-curl -fsS "https://$DOMAIN/api/health" && echo
+curl -fsS --max-time 10 "https://$DOMAIN/api/health" && echo || log "AVISO: no pude verificar https://$DOMAIN desde el propio servidor (puede ser DNS/hairpin); revisa desde el teléfono."
 log "Listo: https://$DOMAIN  (versión $TS, puerto $PORT)"
 log "Revertir: sudo bash $APP/current/scripts/rollback.sh"

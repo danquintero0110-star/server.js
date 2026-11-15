@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Revertir Selah en un comando:  sudo bash /opt/selah/current/scripts/rollback.sh
-#   (sin opciones)  → vuelve a la versión anterior; si es la primera, desinstala.
+#   (sin opciones)  → vuelve a la versión anterior (si no hay, no hace nada y lo avisa).
 #   --uninstall     → quita servicio y sitio de nginx (datos y respaldos se conservan).
 #   --restore-db    → además restaura el respaldo de base de datos más reciente.
 # Nunca reinicia nginx ni otros servicios: solo nginx -t + reload.
@@ -42,9 +42,9 @@ esac
 PREV=$(cat "$APP/.previous" 2>/dev/null || true)
 CUR=$(readlink -f "$APP/current" 2>/dev/null || true)
 if [ -z "$PREV" ] || [ ! -d "$PREV" ] || [ "$PREV" = "$CUR" ]; then
-  log "No hay versión anterior: esta fue la primera instalación."
-  uninstall
-  exit 0
+  log "No hay versión anterior a la cual volver (primera instalación)."
+  log "Para quitar Selah por completo: sudo bash $0 --uninstall"
+  exit 1
 fi
 [ "${1:-}" = "--restore-db" ] && restore_db
 ln -sfn "$PREV" "$APP/current"

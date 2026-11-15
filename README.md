@@ -25,7 +25,7 @@ Proyecto independiente: su propio repo, carpeta (`/opt/selah`), base de datos
 
 ```bash
 npm install
-npm test                       # 20 pruebas (API completa con proveedores simulados)
+npm test                       # 21 pruebas (API completa con proveedores simulados)
 node scripts/create-user.js danny
 npm run dev                    # http://127.0.0.1:3070  (COOKIE_SECURE=false para HTTP local)
 ```
@@ -43,9 +43,9 @@ sudo -u selah SELAH_DATA_DIR=/var/lib/selah node /opt/selah/current/scripts/crea
 SELAH_URL=https://selah.orbitix.app SELAH_USER=danny SELAH_PASS=… node scripts/e2e.js   # prueba real de punta a punta
 ```
 
-**Revertir en un comando:** `sudo bash /opt/selah/current/scripts/rollback.sh`
-(versión anterior; si era la primera instalación, desinstala servicio y sitio nginx, conservando datos).
-Opciones: `--restore-db`, `--uninstall`.
+**Revertir en un comando:**
+- Primera instalación (quitar todo, conservando datos): `sudo bash /opt/selah/current/scripts/rollback.sh --uninstall`
+- Actualizaciones (volver a la versión anterior): `sudo bash /opt/selah/current/scripts/rollback.sh` (`--restore-db` para restaurar también la base de datos)
 
 Respaldos: base de datos antes de cada despliegue y diario a las 03:40 (`selah-backup.timer`, 14 copias)
 en `/var/lib/selah/backups`; configuración de nginx en `/var/backups/selah/`.

@@ -62,20 +62,27 @@ export function youtubeId(url) {
 
 export async function downloadYoutube(videoId, outDir, id) {
   const tpl = path.join(outDir, `${id}.%(ext)s`);
+  const cleanup = () => fs.readdirSync(outDir).filter((f) => f.startsWith(`${id}.`)).forEach((f) => fs.rmSync(path.join(outDir, f), { force: true }));
   const out = await run(
     config.bin.ytdlp,
     [
       '-f', 'bestaudio[ext=m4a]/bestaudio',
-      '--no-playlist', '--no-progress',
+      '--no-playlist', '--no-progress', '--match-filters', '!is_live',
       '--print', 'after_move:%(filepath)s\t%(title)s\t%(duration)s\t%(uploader)s\t%(upload_date)s',
       '-o', tpl,
       `https://www.youtube.com/watch?v=${videoId}`,
     ],
     { timeoutMs: 60 * 60_000 },
-  );
+  ).catch((e) => {
+    cleanup();
+    throw e;
+  });
   const line = out.trim().split('\n').pop() || '';
   const [filepath, title, duration, uploader, uploadDate] = line.split('\t');
-  if (!filepath || !fs.existsSync(filepath)) throw new Error('yt-dlp no produjo archivo de audio');
+  if (!filepath || !fs.existsSync(filepath)) {
+    cleanup();
+    throw new Error('yt-dlp no produjo audio. Si es una transmisión en vivo, espera a que termine.');
+  }
   const ext = path.extname(filepath).slice(1);
   return {
     file: filepath,

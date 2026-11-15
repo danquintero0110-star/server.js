@@ -45,7 +45,8 @@ export function createQueue(db, { log = console } = {}) {
     if (!note) return;
     const dir = audioDir();
     fs.mkdirSync(dir, { recursive: true });
-    const cost = JSON.parse(note.cost_json || '{}');
+    const addCost = (key, usd) =>
+      db.prepare("UPDATE notes SET cost_json = json_set(cost_json, '$.' || ?, ?) WHERE id = ?").run(key, usd, id);
     let { audio_file: audioFile, audio_mime: audioMime } = note;
     let hint = '';
 
@@ -88,12 +89,11 @@ export function createQueue(db, { log = console } = {}) {
       }
       try {
         const t = await deps.stt.transcribe(sttFile, sttMime);
-        cost.transcription = t.costUsd;
+        addCost('transcription', t.costUsd);
         set(id, {
           transcript_json: JSON.stringify({ segments: t.segments }),
           provider: t.provider,
           duration_sec: duration || t.duration,
-          cost_json: JSON.stringify(cost),
         });
       } finally {
         fs.rmSync(tmp, { force: true });
@@ -109,13 +109,12 @@ export function createQueue(db, { log = console } = {}) {
       const [r] = resolveVerses(db, [d]);
       return { ...d, reference: r?.reference || '', code: r?.code || '' };
     });
-    cost.analysis = costUsd;
+    addCost('analysis', costUsd);
     set(id, {
       analysis_json: JSON.stringify(analysis),
       title: fresh.title || analysis.title || 'Prédica sin título',
       preacher: fresh.preacher || analysis.preacher || '',
       status: 'ready',
-      cost_json: JSON.stringify(cost),
     });
     indexNote(db, id);
   }
@@ -123,16 +122,22 @@ export function createQueue(db, { log = console } = {}) {
   async function drain() {
     if (running) return;
     running = true;
-    while (pending.length) {
-      const id = pending.shift();
-      try {
-        await processNote(id);
-      } catch (e) {
-        log.error?.(`Nota ${id}: ${e.stack || e.message}`);
-        set(id, { status: 'error', error: e.message.slice(0, 500) });
+    try {
+      while (pending.length) {
+        const id = pending.shift();
+        try {
+          await processNote(id);
+        } catch (e) {
+          const msg = String(e?.message ?? e);
+          log.error?.(`Nota ${id}: ${e?.stack || msg}`);
+          try {
+            set(id, { status: 'error', error: msg.slice(0, 500) });
+          } catch {}
+        }
       }
+    } finally {
+      running = false;
     }
-    running = false;
   }
 
   return {

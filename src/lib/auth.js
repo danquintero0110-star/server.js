@@ -48,6 +48,7 @@ export function loginAllowed(ip) {
   return a.count < 8;
 }
 export function loginFailed(ip) {
+  if (attempts.size > 5000) for (const [k, v] of attempts) if (Date.now() - v.first > 15 * 60_000) attempts.delete(k);
   const a = attempts.get(ip);
   if (!a || Date.now() - a.first > 15 * 60_000) attempts.set(ip, { first: Date.now(), count: 1 });
   else a.count++;

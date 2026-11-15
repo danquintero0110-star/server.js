@@ -58,7 +58,20 @@ after(() => app.close());
 
 test('la API exige sesión', async () => {
   assert.equal((await app.inject({ url: '/api/notes' })).statusCode, 401);
+  for (const url of ['/%61pi/notes', '/api/%6eotes', '/api/notes?x=/api/login', '/api/login/../notes', '/%61pi/folders']) {
+    const r = await app.inject({ url });
+    assert.ok(r.statusCode === 401 || r.statusCode === 404, `${url} → ${r.statusCode}`);
+    assert.doesNotMatch(r.body, /"id"/);
+  }
   assert.equal((await app.inject({ url: '/api/health' })).statusCode, 200);
+});
+
+test('el freno de login no se salta cambiando X-Forwarded-For', async () => {
+  let last;
+  for (let i = 0; i < 9; i++) {
+    last = await app.inject({ method: 'POST', url: '/api/login', remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': `6.6.6.${i}, 9.9.9.9` }, payload: { username: 'danny', password: 'x' } });
+  }
+  assert.equal(last.statusCode, 429);
 });
 
 test('login rechaza clave mala y acepta la buena', async () => {
