@@ -1,0 +1,25 @@
+[Unit]
+Description=Selah — notas de prédicas
+After=network.target
+
+[Service]
+Type=simple
+User=selah
+Group=selah
+WorkingDirectory=/opt/selah/current
+EnvironmentFile=/etc/selah/selah.env
+Environment=NODE_ENV=production
+Environment=SELAH_DATA_DIR=/var/lib/selah
+ExecStart=/usr/bin/env node src/server.js
+Restart=on-failure
+RestartSec=3
+# Aislamiento: solo puede escribir en su carpeta de datos.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/selah
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

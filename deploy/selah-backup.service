@@ -1,0 +1,9 @@
+[Unit]
+Description=Respaldo diario de Selah
+
+[Service]
+Type=oneshot
+User=selah
+EnvironmentFile=/etc/selah/selah.env
+Environment=SELAH_DATA_DIR=/var/lib/selah
+ExecStart=/usr/bin/env node /opt/selah/current/scripts/backup-db.js /var/lib/selah/backups

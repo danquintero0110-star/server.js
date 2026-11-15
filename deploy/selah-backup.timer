@@ -1,0 +1,9 @@
+[Unit]
+Description=Respaldo diario de Selah (03:40)
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
