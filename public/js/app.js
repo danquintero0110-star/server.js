@@ -399,19 +399,20 @@ function uploadBlob(blob, source, onDone) {
   const bar = h('i');
   const label = h('p', { class: 'muted tnum', style: { margin: '10px 0 0' } }, 'Preparando…');
   const s = sheet(() => [h('h3', {}, 'Subiendo audio'), label, h('div', { class: 'progress' }, bar)]);
-  const fd = new FormData();
-  fd.append('source', source);
-  const folder = folderForNew();
-  if (folder) fd.append('folderId', folder);
   const today = new Date();
-  fd.append('preachedAt', `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`);
+  const fields = {
+    source,
+    folderId: folderForNew(),
+    preachedAt: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`,
+  };
   const ext = (blob.type.includes('mp4') ? 'm4a' : blob.type.split('/')[1]?.split(';')[0]) || 'webm';
-  fd.append('audio', blob, blob.name || `grabacion.${ext}`);
-  const mb = (blob.size / 1048576).toFixed(1);
+  if (!blob.name) blob = new File([blob], `grabacion.${ext}`, { type: blob.type });
+  const total = blob.size / 1048576;
+  const fmt = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`);
   return api
-    .upload('/api/notes', fd, (p) => {
+    .uploadChunked(blob, fields, (p) => {
       bar.style.width = `${Math.round(p * 100)}%`;
-      label.textContent = `${Math.round(p * 100)}% · ${mb} MB`;
+      label.textContent = `${Math.round(p * 100)}% · ${fmt(total * p)} de ${fmt(total)}`;
     })
     .then(async (n) => {
       await onDone?.();

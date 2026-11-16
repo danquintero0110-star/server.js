@@ -17,6 +17,15 @@ import { availableProvider } from './providers/transcribe.js';
 
 const EXT = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/aac': 'aac', 'audio/flac': 'flac' };
 
+function freeBytes(dir) {
+  try {
+    const s = fs.statfsSync(dir);
+    return s.bavail * s.bsize;
+  } catch {
+    return Infinity;
+  }
+}
+
 function serializeNote(n, { full = false } = {}) {
   const base = {
     id: n.id,
@@ -57,6 +66,15 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   const getNote = (id) => db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+  function createNote(req, n) {
+    db.prepare(
+      `INSERT INTO notes (id, title, preacher, preached_at, folder_id, source_type, source_url, audio_file, audio_mime, status)
+       VALUES (@id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, 'queued')`,
+    ).run(n);
+    indexNote(db, n.id);
+    Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
+    return serializeNote(getNote(n.id), { full: true });
+  }
 
   // --- Autenticación -------------------------------------------------------
   // Se decide con la ruta ya resuelta por el router (no con la URL cruda, que puede venir codificada).
@@ -199,13 +217,145 @@ export function buildApp({ db, queue, logger = false }) {
       fields.folder_id = Number(b.folderId) || null;
     }
 
-    db.prepare(
-      `INSERT INTO notes (id, title, preacher, preached_at, folder_id, source_type, source_url, audio_file, audio_mime, status)
-       VALUES (@id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, 'queued')`,
-    ).run({ id, ...fields, sourceType, sourceUrl, audioFile, audioMime });
-    indexNote(db, id);
-    Promise.resolve(queue.enqueue(id)).catch((e) => req.log.error(e));
-    return reply.code(201).send(serializeNote(getNote(id), { full: true }));
+    return reply.code(201).send(createNote(req, { id, ...fields, sourceType, sourceUrl, audioFile, audioMime }));
+  });
+
+  // --- Subida por partes (archivos grandes, reanudable) ----------------------
+  // 1) POST /api/uploads {size, mime, name, ...} → {id, offset}
+  // 2) PUT  /api/uploads/:id?offset=N  (cuerpo binario, ≤ 16 MB por parte)
+  // 3) GET  /api/uploads/:id → {offset}  (para reanudar tras un corte)
+  // 4) POST /api/uploads/:id/finish → crea la nota
+  const upDir = () => path.join(config.dataDir, 'uploads');
+  const upMeta = (uid) => path.join(upDir(), `${uid}.json`);
+  const upPart = (uid) => path.join(upDir(), `${uid}.part`);
+  const readUp = (uid) => {
+    if (!/^[0-9a-f-]{36}$/.test(uid)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(upMeta(uid), 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  const upOffset = (uid) => {
+    try {
+      return fs.statSync(upPart(uid)).size;
+    } catch {
+      return 0;
+    }
+  };
+  const cleanUploads = () => {
+    try {
+      for (const f of fs.readdirSync(upDir())) {
+        const full = path.join(upDir(), f);
+        if (Date.now() - fs.statSync(full).mtimeMs > 24 * 3600 * 1000) fs.rmSync(full, { force: true });
+      }
+    } catch {}
+  };
+  cleanUploads();
+  const cleanTimer = setInterval(cleanUploads, 3600 * 1000);
+  cleanTimer.unref();
+  app.addHook('onClose', async () => clearInterval(cleanTimer));
+
+  app.addContentTypeParser('application/octet-stream', (req, payload, done) => done(null, payload));
+
+  app.post('/api/uploads', async (req, reply) => {
+    const b = req.body || {};
+    const size = Number(b.size);
+    const mime = String(b.mime || '').split(';')[0];
+    if (!Number.isInteger(size) || size <= 0) return reply.code(400).send({ error: 'Archivo vacío' });
+    if (mime && !mime.startsWith('audio/') && !mime.startsWith('video/') && mime !== 'application/octet-stream') {
+      return reply.code(400).send({ error: 'El archivo debe ser de audio o video' });
+    }
+    if (size > config.maxUploadMb * 1048576) return reply.code(413).send({ error: `El archivo supera ${config.maxUploadMb} MB` });
+    fs.mkdirSync(upDir(), { recursive: true });
+    if (freeBytes(upDir()) - size < config.minFreeMb * 1048576) {
+      return reply.code(507).send({ error: 'No hay espacio suficiente en el servidor para este archivo' });
+    }
+    const uid = crypto.randomUUID();
+    const ext = EXT[mime] || path.extname(String(b.name || '')).slice(1).replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'bin';
+    const meta = {
+      size,
+      mime: mime || 'application/octet-stream',
+      ext,
+      sourceType: b.source === 'record' ? 'record' : 'upload',
+      title: String(b.title || '').slice(0, 200),
+      preacher: String(b.preacher || '').slice(0, 200),
+      preached_at: /^\d{4}-\d{2}-\d{2}$/.test(b.preachedAt || '') ? b.preachedAt : new Date().toISOString().slice(0, 10),
+      folder_id: Number(b.folderId) || null,
+    };
+    fs.writeFileSync(upMeta(uid), JSON.stringify(meta));
+    fs.writeFileSync(upPart(uid), '');
+    return { id: uid, offset: 0, chunkSize: 8 * 1048576 };
+  });
+
+  app.get('/api/uploads/:id', async (req, reply) => {
+    const meta = readUp(req.params.id);
+    if (!meta) return reply.code(404).send({ error: 'La subida ya no existe' });
+    return { id: req.params.id, offset: upOffset(req.params.id), size: meta.size };
+  });
+
+  const MAX_CHUNK = 16 * 1048576;
+  const busy = new Set();
+  app.put('/api/uploads/:id', async (req, reply) => {
+    const uid = req.params.id;
+    const meta = readUp(uid);
+    if (!meta) return reply.code(404).send({ error: 'La subida ya no existe' });
+    if (busy.has(uid)) return reply.code(409).send({ error: 'Parte en curso', offset: upOffset(uid) });
+    const offset = Number(req.query.offset);
+    const have = upOffset(uid);
+    if (offset !== have) return reply.code(409).send({ error: 'Posición distinta', offset: have });
+    const stream = req.body;
+    if (!stream || typeof stream.pipe !== 'function') return reply.code(400).send({ error: 'Falta el contenido' });
+    busy.add(uid);
+    const tmp = `${upPart(uid)}.chunk`;
+    try {
+      let n = 0;
+      const out = fs.createWriteStream(tmp);
+      await pump(
+        stream,
+        async function* (src) {
+          for await (const c of src) {
+            n += c.length;
+            if (n > MAX_CHUNK || have + n > meta.size) throw Object.assign(new Error('Parte demasiado grande'), { statusCode: 413 });
+            yield c;
+          }
+        },
+        out,
+      );
+      // Solo se agrega una parte completa: si la conexión se cortó a medias, se descarta.
+      fs.appendFileSync(upPart(uid), fs.readFileSync(tmp));
+    } catch (e) {
+      if (e.statusCode === 413) return reply.code(413).send({ error: e.message });
+      throw e;
+    } finally {
+      fs.rmSync(tmp, { force: true });
+      busy.delete(uid);
+    }
+    return { offset: upOffset(uid), size: meta.size };
+  });
+
+  app.post('/api/uploads/:id/finish', async (req, reply) => {
+    const uid = req.params.id;
+    const meta = readUp(uid);
+    if (!meta) return reply.code(404).send({ error: 'La subida ya no existe' });
+    if (busy.has(uid)) return reply.code(409).send({ error: 'Parte en curso' });
+    const have = upOffset(uid);
+    if (have !== meta.size) return reply.code(409).send({ error: 'La subida no está completa', offset: have });
+    const id = crypto.randomUUID();
+    const audioFile = `${id}.src.${meta.ext}`;
+    fs.mkdirSync(audioDir(), { recursive: true });
+    fs.renameSync(upPart(uid), path.join(audioDir(), audioFile));
+    fs.rmSync(upMeta(uid), { force: true });
+    const { size, mime, ext, sourceType, ...fields } = meta;
+    return reply.code(201).send(createNote(req, { id, ...fields, sourceType, sourceUrl: '', audioFile, audioMime: mime }));
+  });
+
+  app.delete('/api/uploads/:id', async (req) => {
+    if (readUp(req.params.id)) {
+      fs.rmSync(upPart(req.params.id), { force: true });
+      fs.rmSync(upMeta(req.params.id), { force: true });
+    }
+    return { ok: true };
   });
 
   app.get('/api/notes/:id', async (req, reply) => {

@@ -19,7 +19,9 @@ export const config = {
   publicDir: path.join(ROOT, 'public'),
   bibleFile: path.join(ROOT, 'data', 'bible', 'spaRV1909_vpl.txt.gz'),
   cookieSecure: env.COOKIE_SECURE !== 'false',
-  maxUploadMb: Number(env.MAX_UPLOAD_MB || 400),
+  maxUploadMb: Number(env.MAX_UPLOAD_MB || 2048),
+  // Espacio que siempre debe quedar libre en el disco (servidor compartido).
+  minFreeMb: Number(env.MIN_FREE_MB || 1536),
   ai: {
     model: env.AI_MODEL || 'claude-opus-5-5',
     effort: env.AI_EFFORT || 'medium',

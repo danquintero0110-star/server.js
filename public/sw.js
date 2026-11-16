@@ -1,5 +1,5 @@
 // Service worker: interfaz disponible sin conexión; la API siempre va a la red.
-const VERSION = 'selah-v1';
+const VERSION = 'selah-v2';
 const SHELL = ['/', '/css/app.css', '/js/app.js', '/js/ui.js', '/js/api.js', '/js/recorder.js', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -16,8 +16,10 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   // Red primero para estáticos propios (siempre frescos), caché como respaldo.
+  // Los propios se revalidan con el servidor (no la caché HTTP de 1 h) para recibir arreglos al instante.
+  const fresh = url.origin === location.origin ? fetch(e.request, { cache: 'no-cache' }) : fetch(e.request);
   e.respondWith(
-    fetch(e.request)
+    fresh
       .then((res) => {
         if (res.ok && (url.origin === location.origin || url.hostname.endsWith('gstatic.com') || url.hostname.endsWith('googleapis.com'))) {
           const copy = res.clone();

@@ -10,7 +10,7 @@ function run(bin, args, { timeoutMs = 30 * 60_000 } = {}) {
     let err = '';
     const t = setTimeout(() => p.kill('SIGKILL'), timeoutMs);
     p.stdout.on('data', (d) => (out += d));
-    p.stderr.on('data', (d) => (err += d));
+    p.stderr.on('data', (d) => (err = (err + d).slice(-4000)));
     p.on('error', (e) => {
       clearTimeout(t);
       reject(new Error(`${path.basename(bin)} no disponible: ${e.message}`));
@@ -41,12 +41,22 @@ export async function toTranscriptionAudio(input, output) {
   return output;
 }
 
-const PLAYABLE = new Set(['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/webm', 'audio/wav', 'audio/x-wav']);
+const PLAYABLE = new Set(['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/webm']);
+// Por encima de esto se comprime aunque sea reproducible (p. ej. MP3 de alta calidad de 3 horas).
+const MAX_KEEP_BYTES = 120 * 1048576;
 
-/** Garantiza un archivo reproducible en cualquier navegador (Safari incluido). */
+/**
+ * Garantiza un archivo reproducible en cualquier navegador (Safari incluido) y liviano:
+ * video, WAV, FLAC o archivos muy pesados se convierten a AAC mono 64 kbps (45 min ≈ 22 MB)
+ * y se borra el original para no llenar el disco.
+ */
 export async function ensurePlayable(input, mime, outDir, id) {
   const base = (mime || '').split(';')[0];
-  if (PLAYABLE.has(base)) return { file: path.basename(input), mime: base };
+  let size = 0;
+  try {
+    size = fs.statSync(input).size;
+  } catch {}
+  if (PLAYABLE.has(base) && size <= MAX_KEEP_BYTES) return { file: path.basename(input), mime: base };
   const out = path.join(outDir, `${id}-play.m4a`);
   await run(config.bin.ffmpeg, ['-y', '-i', input, '-vn', '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-movflags', '+faststart', out]);
   fs.rmSync(input, { force: true });

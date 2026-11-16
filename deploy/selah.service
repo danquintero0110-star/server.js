@@ -20,6 +20,9 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/selah
 MemoryMax=1G
+# Servidor compartido: Selah (y ffmpeg) ceden la CPU a los demás proyectos.
+Nice=10
+CPUQuota=120%
 
 [Install]
 WantedBy=multi-user.target

@@ -113,6 +113,53 @@ test('subir audio procesa la nota de punta a punta', async () => {
   assert.equal(anthropic.calls[0].output_config.format.type, 'json_schema');
 });
 
+test('subida por partes: reanuda, rechaza posiciones malas y crea la nota', async () => {
+  const data = Buffer.alloc(20 * 1024 * 1024 + 123, 7);
+  const start = await app.inject({ method: 'POST', url: '/api/uploads', headers: { cookie }, payload: { size: data.length, mime: 'video/mp4', name: 'culto.mp4', source: 'upload', preachedAt: '2026-11-15' } });
+  assert.equal(start.statusCode, 200, start.body);
+  const { id, chunkSize } = start.json();
+  const put = (offset, buf) =>
+    app.inject({ method: 'PUT', url: `/api/uploads/${id}?offset=${offset}`, headers: { cookie, 'content-type': 'application/octet-stream' }, body: buf });
+  // Terminar antes de tiempo no se permite.
+  assert.equal((await app.inject({ method: 'POST', url: `/api/uploads/${id}/finish`, headers: { cookie } })).statusCode, 409);
+  let r = await put(0, data.subarray(0, chunkSize));
+  assert.equal(r.json().offset, chunkSize);
+  // Reenviar la misma parte (p. ej. tras perder la respuesta) responde 409 con la posición real.
+  r = await put(0, data.subarray(0, chunkSize));
+  assert.equal(r.statusCode, 409);
+  assert.equal((await app.inject({ url: `/api/uploads/${id}`, headers: { cookie } })).json().offset, chunkSize);
+  // Una parte de más de 16 MB se rechaza.
+  assert.equal((await put(chunkSize, Buffer.alloc(17 * 1024 * 1024))).statusCode, 413);
+  for (let o = chunkSize; o < data.length; o += chunkSize) {
+    r = await put(o, data.subarray(o, o + chunkSize));
+    assert.equal(r.statusCode, 200, r.body);
+  }
+  const fin = await app.inject({ method: 'POST', url: `/api/uploads/${id}/finish`, headers: { cookie } });
+  assert.equal(fin.statusCode, 201, fin.body);
+  const n = await waitReady(fin.json().id);
+  assert.equal(n.status, 'ready', n.error);
+  assert.equal(n.sourceType, 'upload');
+  assert.equal(n.preachedAt, '2026-11-15');
+  assert.equal(fs.readdirSync(path.join(dataDir, 'uploads')).length, 0);
+  await app.inject({ method: 'DELETE', url: `/api/notes/${n.id}`, headers: { cookie } });
+});
+
+test('subida por partes: límites de tamaño, tipo y espacio en disco', async () => {
+  const post = (payload) => app.inject({ method: 'POST', url: '/api/uploads', headers: { cookie }, payload });
+  assert.equal((await post({ size: 3 * 1024 ** 3, mime: 'audio/wav' })).statusCode, 413);
+  assert.equal((await post({ size: 100, mime: 'image/png' })).statusCode, 400);
+  assert.equal((await post({ size: 0, mime: 'audio/wav' })).statusCode, 400);
+  const prev = config.minFreeMb;
+  config.minFreeMb = 1e12;
+  try {
+    assert.equal((await post({ size: 100, mime: 'audio/wav' })).statusCode, 507);
+  } finally {
+    config.minFreeMb = prev;
+  }
+  assert.equal((await app.inject({ method: 'PUT', url: '/api/uploads/nope?offset=0', headers: { cookie, 'content-type': 'application/octet-stream' }, body: 'x' })).statusCode, 404);
+  assert.equal((await app.inject({ method: 'POST', url: '/api/uploads', payload: { size: 1 } })).statusCode, 401);
+});
+
 test('el audio se sirve con soporte de rangos', async () => {
   const r = await app.inject({ url: `/api/notes/${noteId}/audio`, headers: { cookie, range: 'bytes=0-3' } });
   assert.equal(r.statusCode, 206);
