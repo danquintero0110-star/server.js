@@ -297,6 +297,8 @@ async function listenStudy(note) {
       st.status(script[flat[idx].si].label);
       st.caption(flat[idx].line);
       const my = idx;
+      V.prefetch(flat[idx + 1]?.line);
+      V.prefetch(flat[idx + 2]?.line);
       await V.speak(flat[idx].line, { rate: rate() });
       if (!playing || my !== idx) return;
       idx++;
