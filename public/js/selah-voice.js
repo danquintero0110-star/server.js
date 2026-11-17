@@ -297,9 +297,9 @@ async function listenStudy(note) {
       st.status(script[flat[idx].si].label);
       st.caption(flat[idx].line);
       const my = idx;
-      V.prefetch(flat[idx + 1]?.line);
-      V.prefetch(flat[idx + 2]?.line);
-      await V.speak(flat[idx].line, { rate: rate() });
+      const line = (k) => flat[k]?.line || '';
+      V.prefetch(line(idx + 1), { prev: line(idx), next: line(idx + 2) });
+      await V.speak(line(idx), { rate: rate(), prev: line(idx - 1), next: line(idx + 1) });
       if (!playing || my !== idx) return;
       idx++;
     }

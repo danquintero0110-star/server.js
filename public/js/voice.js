@@ -59,14 +59,18 @@ export function forSpeech(text) {
     .trim();
 }
 
-/** Corta en frases (para subtítulos, para que la voz empiece rápido y para no exceder límites). */
-export function sentences(text) {
+/**
+ * Corta en fragmentos de 2-3 frases (~300 caracteres): la voz fluye como una persona hablando
+ * y hay menos uniones. El primero es más corto para que la voz empiece rápido.
+ */
+export function sentences(text, { target = 300, first = 160 } = {}) {
   const out = [];
   for (const s of forSpeech(text).match(/[^.!?¡¿;:]+[.!?;:]*|[¡¿][^.!?]+[.!?]*/g) || []) {
     const t = s.trim();
     if (!t) continue;
     const last = out[out.length - 1];
-    if (last && (last.length < 40 || t.length < 12) && last.length + t.length < 220) out[out.length - 1] += ` ${t}`;
+    const limit = out.length === 1 ? first : target;
+    if (last && (last.length < 40 || t.length < 12 || last.length + t.length < limit) && last.length + t.length < 420) out[out.length - 1] += ` ${t}`;
     else if (t.length > 900) out.push(...(t.match(/.{1,700}(\s|$)/g) || [t]).map((x) => x.trim()));
     else out.push(t);
   }
@@ -75,14 +79,14 @@ export function sentences(text) {
 
 // ---- Voz humana del servidor
 const cache = new Map(); // "voz|texto" → Promise<objectURL>
-function cloudUrl(text, voice = getVoiceId()) {
+function cloudUrl(text, { prev = '', next = '' } = {}, voice = getVoiceId()) {
   const key = `${voice}|${text}`;
   if (cache.has(key)) return cache.get(key);
   const p = fetch('/api/tts', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice, noteId }),
+    body: JSON.stringify({ text, voice, noteId, prev, next }),
   })
     .then((r) => {
       if (!r.ok) throw new Error(`tts ${r.status}`);
@@ -98,21 +102,37 @@ function cloudUrl(text, voice = getVoiceId()) {
   }
   return p;
 }
-/** Pide el audio por adelantado para que no haya pausas entre frases. */
-export function prefetch(text) {
-  if (text && useCloud()) cloudUrl(text).catch(() => {});
+// Audios ya cargados y listos para sonar (sin hueco entre fragmentos).
+const ready = new Map(); // objectURL → HTMLAudioElement
+function preload(url) {
+  if (ready.has(url) || typeof Audio === 'undefined') return;
+  const a = new Audio();
+  a.preload = 'auto';
+  a.src = url;
+  a.load();
+  ready.set(url, a);
+  if (ready.size > 6) ready.delete(ready.keys().next().value);
+}
+/** Pide y carga el audio por adelantado para que no haya pausas entre fragmentos. */
+export function prefetch(text, ctx = {}) {
+  if (text && useCloud()) cloudUrl(text, ctx).then(preload).catch(() => {});
 }
 
 let audioEl = null;
 let stopCurrent = null;
 let playingCloud = false;
-function cloudSay(t, rate, my) {
-  return cloudUrl(t).then(
+function cloudSay(t, rate, my, ctx = {}) {
+  return cloudUrl(t, ctx).then(
     (url) =>
       new Promise((resolve, reject) => {
         if (my !== token) return resolve();
-        audioEl ||= new Audio();
-        const a = audioEl;
+        let a = ready.get(url);
+        ready.delete(url);
+        if (!a) {
+          audioEl ||= new Audio();
+          a = audioEl;
+          a.src = url;
+        }
         const finish = (err) => {
           a.onended = a.onerror = null;
           playingCloud = false;
@@ -125,7 +145,6 @@ function cloudSay(t, rate, my) {
         };
         a.onended = () => finish();
         a.onerror = () => finish(new Error('audio'));
-        a.src = url;
         a.playbackRate = rate;
         a.preservesPitch = true;
         playingCloud = true;
@@ -138,25 +157,25 @@ let token = 0;
 let keepAlive = 0;
 
 /** Habla un texto. Devuelve una promesa que se cumple al terminar (o al detenerse). */
-export async function speak(text, { rate = 1, onSentence } = {}) {
+export async function speak(text, { rate = 1, onSentence, prev = '', next = '' } = {}) {
   if (!canSpeak()) return;
   const my = ++token;
   const parts = sentences(text);
-  prefetch(parts[0]);
-  prefetch(parts[1]);
+  const ctx = (i) => ({ prev: i > 0 ? parts[i - 1] : prev, next: i < parts.length - 1 ? parts[i + 1] : next });
+  prefetch(parts[0], ctx(0));
+  prefetch(parts[1], ctx(1));
   for (let i = 0; i < parts.length; i++) {
     if (my !== token) return;
-    prefetch(parts[i + 1]);
-    prefetch(parts[i + 2]);
+    prefetch(parts[i + 1], ctx(i + 1));
     onSentence?.(i, parts[i]);
-    await sayOne(parts[i], rate, my);
+    await sayOne(parts[i], rate, my, ctx(i));
   }
 }
 
-async function sayOne(t, rate, my) {
+async function sayOne(t, rate, my, ctx = {}) {
   if (useCloud()) {
     try {
-      return await cloudSay(t, rate, my);
+      return await cloudSay(t, rate, my, ctx);
     } catch {
       if (my !== token) return;
       cloudDownUntil = Date.now() + 60000; // un minuto con la voz del teléfono y se reintenta
@@ -229,27 +248,31 @@ export function streamSpeaker({ rate = 1, onSentence } = {}) {
   let resolveAll;
   const all = new Promise((r) => (resolveAll = r));
 
+  let lastSaid = '';
   async function pump() {
     if (playing) return;
     while (queue.length && my === token) {
       const t = queue.shift();
-      prefetch(queue[0]);
+      if (queue[0]) prefetch(queue[0], { prev: t });
       onSentence?.(t);
-      playing = sayOne(t, rate, my);
+      playing = sayOne(t, rate, my, { prev: lastSaid, next: queue[0] || '' });
+      lastSaid = t;
       await playing;
       playing = null;
     }
     if (ended && !queue.length) resolveAll();
     if (my !== token) resolveAll();
   }
+  let count = 0;
   function enqueue(t) {
     queue.push(t);
-    prefetch(t);
+    prefetch(t, { prev: queue[queue.length - 2] || lastSaid });
+    count++;
   }
   function flush(force) {
-    const re = /^([\s\S]*?[.!?;:])(\s|$)/;
+    // La primera frase sale en cuanto está lista; las demás se juntan (~2 frases) para que fluya.
     let m;
-    while ((m = re.exec(buf)) && (m[1].length >= 30 || force)) {
+    while ((m = (count === 0 ? /^([\s\S]*?[.!?;:])(\s|$)/ : /^([\s\S]{140,}?[.!?;:])(\s|$)/).exec(buf)) && (m[1].length >= 30 || force)) {
       const t = forSpeech(m[1]);
       buf = buf.slice(m[0].length);
       if (t) enqueue(t);

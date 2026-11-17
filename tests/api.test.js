@@ -333,11 +333,13 @@ test('voz de locutor (ElevenLabs) con respaldo de Deepgram si falla', async () =
   const realFetch = globalThis.fetch;
   process.env.ELEVENLABS_API_KEY = 'test-eleven';
   let elevenOk = true;
+  let lastBody = null;
   const seen = [];
   globalThis.fetch = async (url, opts) => {
     const u = String(url);
     if (u.startsWith('https://api.elevenlabs.io/')) {
       seen.push('eleven');
+      lastBody = JSON.parse(opts.body);
       return elevenOk ? new Response(Buffer.from('ELEVEN-mp3'), { status: 200 }) : new Response('{"detail":"quota_exceeded"}', { status: 401 });
     }
     if (u.startsWith('https://api.deepgram.com/v1/speak')) {
@@ -351,8 +353,11 @@ test('voz de locutor (ElevenLabs) con respaldo de Deepgram si falla', async () =
     assert.equal(voices.default, 'selah');
     assert.ok(voices.voices.find((v) => v.id === 'selah').premium);
     assert.ok(!voices.voices.some((v) => v.id === 'faraon'), 'voces de biblioteca ocultas sin plan de pago');
-    const r = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'La paz de Dios sea contigo.' } });
+    const r = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'La paz de Dios sea contigo.', prev: 'Hola, soy Selah.', next: 'Vamos a orar.' } });
     assert.equal(r.body, 'ELEVEN-mp3');
+    assert.equal(lastBody.previous_text, 'Hola, soy Selah.');
+    assert.equal(lastBody.next_text, 'Vamos a orar.');
+    assert.equal(lastBody.model_id, 'eleven_v4');
     elevenOk = false;
     const fb = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'selah' } });
     assert.equal(fb.statusCode, 200);

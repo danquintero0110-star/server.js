@@ -33,15 +33,19 @@ export const resolveVoice = (id) => (VOICES[id] && usable(VOICES[id]) ? id : def
 // ElevenLabs Turbo usa medio crédito por carácter (plan gratis: 10 000 créditos al mes).
 const PRICE = { eleven: 0.05, deepgram: 0.03 };
 
-async function eleven(text, v) {
-  const model = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
+async function eleven(text, v, { prev = '', next = '' } = {}) {
+  const model = process.env.ELEVENLABS_TTS_MODEL || 'eleven_v4';
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${v.id}?output_format=mp3_44100_64`, {
     method: 'POST',
     headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
     body: JSON.stringify({
       text,
       model_id: model,
-      voice_settings: { stability: 0.6, similarity_boost: 0.8, style: 0.1, use_speaker_boost: true, speed: 0.94 },
+      // El texto de alrededor hace que la entonación fluya entre fragmentos.
+      ...(prev && { previous_text: prev }),
+      ...(next && { next_text: next }),
+      // Menos estabilidad = más expresiva y humana; ritmo tranquilo, sin arrastrar.
+      voice_settings: { stability: 0.42, similarity_boost: 0.8, style: 0.22, use_speaker_boost: true, speed: 0.97 },
     }),
     signal: AbortSignal.timeout(config.ttsTimeoutMs || 30000),
   });
@@ -61,13 +65,13 @@ async function deepgram(text, v) {
 }
 
 /** Devuelve { audio: Buffer (mp3), costUsd, voice } — si ElevenLabs falla (p. ej. sin créditos), usa Deepgram. */
-export async function synthesize(text, voiceId) {
+export async function synthesize(text, voiceId, ctx = {}) {
   const id = resolveVoice(voiceId);
   const v = VOICES[id];
   const cost = (p) => Math.round((text.length / 1000) * PRICE[p] * 10000) / 10000;
   if (v.provider === 'eleven') {
     try {
-      return { audio: await eleven(text, v), costUsd: cost('eleven'), voice: id };
+      return { audio: await eleven(text, v, ctx), costUsd: cost('eleven'), voice: id };
     } catch (e) {
       if (!hasDeepgram()) throw e;
       lastElevenError = e.message;

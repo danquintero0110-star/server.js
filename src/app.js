@@ -648,9 +648,10 @@ export function buildApp({ db, queue, logger = false }) {
       const { audio } = await tts.synthesize(text, voice);
       return reply.send(audio);
     }
+    const ctxText = (x) => String(x || '').replace(/\s+/g, ' ').trim().slice(-300);
     let out;
     try {
-      out = await tts.synthesize(text, voice);
+      out = await tts.synthesize(text, voice, { prev: ctxText(req.body?.prev), next: ctxText(req.body?.next).slice(0, 300) });
     } catch (e) {
       req.log.warn(e.message);
       return reply.code(502).send({ error: 'La voz no respondió' });
