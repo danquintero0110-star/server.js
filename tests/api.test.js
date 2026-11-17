@@ -33,9 +33,9 @@ deps.media = {
 };
 deps.stt = { transcribe: async () => ({ provider: 'deepgram', segments: SAMPLE_SEGMENTS, duration: 240, costUsd: 0.02 }) };
 
-async function waitReady(id) {
+async function waitReady(id, who = cookie) {
   for (let i = 0; i < 100; i++) {
-    const r = await app.inject({ url: `/api/notes/${id}`, headers: { cookie } });
+    const r = await app.inject({ url: `/api/notes/${id}`, headers: { cookie: who } });
     const n = r.json();
     if (n.status === 'ready' || n.status === 'error') return n;
     await new Promise((r) => setTimeout(r, 20));
@@ -441,7 +441,7 @@ test('cuentas separadas: nadie ve ni toca notas, carpetas ni subidas de otro', a
 
 test('cuenta: cambiar contraseña y administración de cuentas', async () => {
   const me = (await app.inject({ url: '/api/me', headers: { cookie } })).json();
-  assert.equal(me.user.isAdmin, 1, 'la primera cuenta es administradora');
+  assert.equal(me.user.isAdmin, true, 'la primera cuenta es administradora');
   const bad = await app.inject({ method: 'POST', url: '/api/me/password', headers: { cookie }, payload: { current: 'mala', next: 'nueva-clave-123' } });
   assert.equal(bad.statusCode, 400);
   const short = await app.inject({ method: 'POST', url: '/api/me/password', headers: { cookie }, payload: { current: 'clave-de-prueba', next: 'corta' } });
@@ -560,4 +560,58 @@ test('la SPA responde en rutas del cliente', async () => {
   const r = await app.inject({ url: '/nota/abc' });
   assert.equal(r.statusCode, 200);
   assert.match(r.headers['content-type'], /text\/html/);
+});
+
+test('cuentas: editar, pausar por falta de pago y eliminar', async () => {
+  const loginAs = async (u, p) => (await app.inject({ method: 'POST', url: '/api/login', payload: { username: u, password: p } })).headers['set-cookie'].split(';')[0];
+  const cr = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie }, payload: { username: 'sobrina' } });
+  const c = cr.json();
+  assert.equal(cr.statusCode, 200, cr.body);
+  const lg = await app.inject({ method: 'POST', url: '/api/login', payload: { username: 'sobrina', password: c.password } });
+  assert.equal(lg.statusCode, 200, lg.body);
+  let z = await loginAs('sobrina', c.password);
+  // Editar nombre visible, usuario y plan.
+  const ed = await app.inject({ method: 'PATCH', url: `/api/admin/users/${c.id}`, headers: { cookie }, payload: { displayName: 'Zabdi', username: 'Zabdi.Q', plan: 'personal' } });
+  assert.equal(ed.statusCode, 200, ed.body);
+  assert.equal(ed.json().username, 'zabdi.q');
+  const me = (await app.inject({ url: '/api/me', headers: { cookie: z } })).json();
+  assert.equal(me.user.displayName, 'Zabdi');
+  assert.equal(me.account.state, 'ok');
+  // Ella misma cambia su nombre.
+  assert.equal((await app.inject({ method: 'PUT', url: '/api/me/profile', headers: { cookie: z }, payload: { displayName: 'Zab' } })).json().displayName, 'Zab');
+  // Crea una nota mientras está al día.
+  const note = (await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie: z }, payload: { youtubeUrl: 'https://youtu.be/dQw4w9WgXcQ' } })).json();
+  await waitReady(note.id, z);
+  // Plan vencido hace más de los días de gracia → se pausan las funciones que cuestan.
+  await app.inject({ method: 'PATCH', url: `/api/admin/users/${c.id}`, headers: { cookie }, payload: { paidUntil: '2020-01-01' } });
+  const blocked = await app.inject({ method: 'POST', url: `/api/notes/${note.id}/chat`, headers: { cookie: z }, payload: { question: 'hola' } });
+  assert.equal(blocked.statusCode, 402);
+  assert.match(blocked.json().error, /renueva/);
+  assert.equal((await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie: z }, payload: { youtubeUrl: 'https://youtu.be/dQw4w9WgXcQ' } })).statusCode, 402);
+  assert.equal((await app.inject({ url: `/api/notes/${note.id}/export.pdf`, headers: { cookie: z } })).statusCode, 402);
+  assert.equal((await app.inject({ url: `/api/notes/${note.id}`, headers: { cookie: z } })).statusCode, 200, 'puede ver sus notas');
+  assert.equal((await app.inject({ url: `/api/notes/${note.id}/whatsapp`, headers: { cookie: z } })).statusCode, 200, 'y copiar el texto');
+  assert.equal((await app.inject({ url: '/api/me', headers: { cookie: z } })).json().account.state, 'blocked');
+  // Renovar: un mes más → vuelve a funcionar.
+  const until = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+  await app.inject({ method: 'PATCH', url: `/api/admin/users/${c.id}`, headers: { cookie }, payload: { paidUntil: until } });
+  assert.equal((await app.inject({ url: `/api/notes/${note.id}/export.pdf`, headers: { cookie: z } })).statusCode, 200);
+  // Pausa manual.
+  await app.inject({ method: 'PATCH', url: `/api/admin/users/${c.id}`, headers: { cookie }, payload: { status: 'suspended' } });
+  assert.equal((await app.inject({ url: `/api/notes/${note.id}/export.pdf`, headers: { cookie: z } })).statusCode, 402);
+  // Protecciones.
+  const me0 = (await app.inject({ url: '/api/me', headers: { cookie } })).json().user;
+  assert.equal((await app.inject({ method: 'PATCH', url: `/api/admin/users/${me0.id}`, headers: { cookie }, payload: { isAdmin: false } })).statusCode, 400, 'queda al menos un admin');
+  assert.equal((await app.inject({ method: 'PATCH', url: `/api/admin/users/${me0.id}`, headers: { cookie }, payload: { status: 'suspended' } })).statusCode, 400);
+  assert.equal((await app.inject({ method: 'DELETE', url: `/api/admin/users/${me0.id}`, headers: { cookie }, payload: { confirm: 'danny' } })).statusCode, 400);
+  assert.equal((await app.inject({ method: 'DELETE', url: `/api/admin/users/${c.id}`, headers: { cookie: z }, payload: { confirm: 'zabdi.q' } })).statusCode, 403);
+  // Eliminar exige escribir el usuario y borra todo lo suyo.
+  assert.equal((await app.inject({ method: 'DELETE', url: `/api/admin/users/${c.id}`, headers: { cookie }, payload: { confirm: 'otra' } })).statusCode, 400);
+  const del = await app.inject({ method: 'DELETE', url: `/api/admin/users/${c.id}`, headers: { cookie }, payload: { confirm: 'zabdi.q' } });
+  assert.equal(del.statusCode, 200, del.body);
+  assert.equal(del.json().deletedNotes, 1);
+  assert.equal((await app.inject({ url: '/api/me', headers: { cookie: z } })).statusCode, 401);
+  assert.equal((await app.inject({ url: `/api/notes/${note.id}`, headers: { cookie } })).statusCode, 404);
+  assert.ok(!fs.readdirSync(path.join(dataDir, 'audio')).some((f) => f.startsWith(note.id)), 'se borraron sus audios');
+  assert.ok(!(await app.inject({ url: '/api/admin/users', headers: { cookie } })).json().some((u) => u.id === c.id));
 });

@@ -87,8 +87,19 @@ export function notificationsSheet() {
 }
 
 // ------------------------------------------------------------------ Mi cuenta
-export function accountSheet(me) {
+export function accountSheet(me, onUpdate) {
   sheet((close) => {
+    const dn = h('input', { class: 'input', placeholder: 'Cómo quieres que te salude (p. ej. Mamá)', value: me?.displayName || '', maxlength: 40 });
+    const saveName = h('button', { class: 'btn small' }, 'Guardar nombre');
+    saveName.onclick = async () => {
+      try {
+        const r = await api.put('/api/me/profile', { displayName: dn.value });
+        onUpdate?.({ displayName: r.displayName });
+        toast('Nombre guardado');
+      } catch (e) {
+        toast(e.message, { error: true });
+      }
+    };
     const cur = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: 'Contraseña actual' });
     const nw = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: 'Nueva contraseña (mínimo 8)' });
     const nw2 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: 'Repite la nueva contraseña' });
@@ -105,7 +116,12 @@ export function accountSheet(me) {
       }
       save.disabled = false;
     };
-    return [h('h3', {}, 'Mi cuenta'), h('p', { class: 'muted' }, `Usuario: ${me?.username || ''}`), h('div', { class: 'stack' }, cur, nw, nw2, save)];
+    return [
+      h('h3', {}, 'Mi cuenta'),
+      h('p', { class: 'muted' }, `Usuario: ${me?.username || ''}`),
+      h('div', { class: 'field' }, h('label', {}, 'Tu nombre'), h('div', { class: 'fx-custom' }, dn, saveName)),
+      h('div', { class: 'field', style: { marginTop: '16px' } }, h('label', {}, 'Cambiar contraseña'), h('div', { class: 'stack' }, cur, nw, nw2, save)),
+    ];
   });
 }
 
@@ -145,26 +161,93 @@ export function adminSheet() {
           h(
             'div',
             { class: 'row-item' },
-            h('div', {}, h('b', {}, u.username), h('small', {}, `${u.notes} ${u.notes === 1 ? 'nota' : 'notas'}${u.isAdmin ? ' · administrador' : ''}`)),
             h(
-              'button',
-              {
-                class: 'btn small',
-                onclick: async () => {
-                  if (!confirm(`¿Generar una contraseña nueva para ${u.username}? Se cerrará su sesión.`)) return;
-                  const r = await api.post(`/api/admin/users/${u.id}/reset`);
-                  out.replaceChildren(credsBox(r.username, r.password));
-                },
-              },
-              icon('refresh'),
-              'Nueva contraseña',
+              'div',
+              {},
+              h('b', {}, u.displayName ? `${u.displayName} ` : '', h('span', { class: 'faint' }, `@${u.username}`)),
+              h('small', {}, `${u.notes} ${u.notes === 1 ? 'nota' : 'notas'}${u.isAdmin ? ' · administrador' : ''} · ${planLabel(u)}`),
+              u.account.state !== 'ok' ? h('span', { class: `status ${u.account.state === 'blocked' ? 'err' : ''}` }, u.account.state === 'blocked' ? (u.status === 'suspended' ? 'En pausa' : 'Vencida') : 'En gracia') : null,
             ),
+            h('button', { class: 'btn small', onclick: () => editUserSheet(u, { onChange: load, out }) }, icon('edit'), 'Editar'),
           ),
         ),
       );
     }
     load().catch((e) => list.replaceChildren(h('p', { class: 'muted' }, e.message)));
     return [h('h3', {}, 'Cuentas'), h('div', { class: 'fx-custom' }, nu, add), out, list];
+  });
+}
+
+const fmtDate = (iso) => (iso ? new Date(`${iso}T12:00:00`).toLocaleDateString('es', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+const planLabel = (u) => `${u.plan || 'familia'}${u.paidUntil ? ` · pagado hasta ${fmtDate(u.paidUntil)}` : ' · sin vencimiento'}`;
+const addMonths = (iso, n) => {
+  const base = iso && iso > new Date().toISOString().slice(0, 10) ? new Date(`${iso}T12:00:00`) : new Date();
+  base.setMonth(base.getMonth() + n);
+  return base.toISOString().slice(0, 10);
+};
+
+function editUserSheet(u, { onChange, out }) {
+  sheet((close) => {
+    const dn = h('input', { class: 'input', value: u.displayName || '', placeholder: 'Nombre visible (p. ej. Mamá)', maxlength: 40 });
+    const un = h('input', { class: 'input', value: u.username, autocapitalize: 'off' });
+    const plan = h('input', { class: 'input', value: u.plan || 'familia', placeholder: 'familia, personal, iglesia…', maxlength: 30 });
+    const paid = h('input', { class: 'input', type: 'date', value: u.paidUntil || '' });
+    const active = h('input', { type: 'checkbox', checked: u.status !== 'suspended' });
+    const admin = h('input', { type: 'checkbox', checked: u.isAdmin });
+    const toggle = (input, title, sub) => h('label', { class: 'card check toggle' }, input, h('span', {}, h('b', {}, title), h('br'), h('small', { class: 'muted' }, sub)));
+    const save = h('button', { class: 'btn primary block' }, 'Guardar cambios');
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        await api.patch(`/api/admin/users/${u.id}`, { displayName: dn.value, username: un.value, plan: plan.value, paidUntil: paid.value, status: active.checked ? 'active' : 'suspended', isAdmin: admin.checked });
+        toast('Cuenta actualizada');
+        close();
+        onChange?.();
+      } catch (e) {
+        toast(e.message, { error: true });
+        save.disabled = false;
+      }
+    };
+    const quick = (n, label) => h('button', { class: 'chip', type: 'button', onclick: () => (paid.value = addMonths(paid.value, n)) }, label);
+    return [
+      h('span', { class: 'eyebrow' }, 'Editar cuenta'),
+      h('h3', {}, u.displayName || u.username),
+      h('div', { class: 'stack', style: { marginTop: '14px' } },
+        h('div', { class: 'field' }, h('label', {}, 'Nombre visible'), dn),
+        h('div', { class: 'field' }, h('label', {}, 'Usuario para entrar'), un),
+        h('div', { class: 'field' }, h('label', {}, 'Plan'), plan),
+        h(
+          'div',
+          { class: 'field' },
+          h('label', {}, 'Pagado hasta (vacío = no vence)'),
+          paid,
+          h('div', { class: 'suggest', style: { marginTop: '6px' } }, quick(1, '+1 mes'), quick(12, '+1 año'), h('button', { class: 'chip', type: 'button', onclick: () => (paid.value = '') }, 'Sin vencimiento')),
+        ),
+        toggle(active, 'Cuenta activa', 'Si la desactivas, puede ver sus notas pero no crear nuevas ni usar la IA.'),
+        toggle(admin, 'Administrador', 'Puede crear, editar y eliminar cuentas.'),
+        save,
+        h('div', { class: 'export-row' },
+          h('button', { class: 'btn small', onclick: async () => {
+            if (!confirm(`¿Generar una contraseña nueva para ${u.username}? Se cerrará su sesión.`)) return;
+            const r = await api.post(`/api/admin/users/${u.id}/reset`);
+            close();
+            out.replaceChildren(credsBox(r.username, r.password));
+          } }, icon('refresh'), 'Nueva contraseña'),
+          h('button', { class: 'btn small danger-btn', onclick: async () => {
+            const typed = prompt(`Esto borra para siempre la cuenta de ${u.username}, sus ${u.notes} notas, audios y conversaciones.\n\nEscribe "${u.username}" para confirmar:`);
+            if (typed == null) return;
+            try {
+              const r = await api.del(`/api/admin/users/${u.id}`, { confirm: typed.trim() });
+              toast(`Cuenta eliminada (${r.deletedNotes} notas)`);
+              close();
+              onChange?.();
+            } catch (e) {
+              toast(e.message, { error: true });
+            }
+          } }, icon('trash'), 'Eliminar cuenta'),
+        ),
+      ),
+    ];
   });
 }
 

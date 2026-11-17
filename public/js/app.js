@@ -32,6 +32,7 @@ async function render() {
     try {
       const me = await api.get('/api/me');
       state.me = me.user;
+      state.account = me.account;
       state.bible = me.bible;
     } catch {
       return go('/entrar', { replace: true });
@@ -230,7 +231,12 @@ async function homeView() {
     clearTimeout(timer);
   };
 
-  const name = state.me?.username ? state.me.username[0].toUpperCase() + state.me.username.slice(1) : '';
+  const name = state.me?.displayName || (state.me?.username ? state.me.username[0].toUpperCase() + state.me.username.slice(1) : '');
+  const acc = state.account;
+  const planBanner =
+    acc?.message
+      ? h('div', { class: `banner plan-${acc.state}` }, icon(acc.state === 'blocked' ? 'key' : 'bell'), h('p', {}, h('b', {}, acc.state === 'blocked' ? 'Plan en pausa' : 'Aviso de tu plan'), h('br'), h('span', { class: 'muted' }, acc.message)))
+      : null;
   return h(
     'main',
     { class: 'view' },
@@ -241,6 +247,7 @@ async function homeView() {
       h('button', { class: 'icon-btn', 'aria-label': 'Más opciones', onclick: menuSheet }, icon('more')),
     ),
     h('div', { class: 'stagger', style: { marginTop: '26px' } }, h('span', { class: 'eyebrow' }, `${greeting()}${name ? `, ${name}` : ''}`), h('h1', { class: 'display' }, 'Lo que Dios ', h('em', {}, 'habló'))),
+    planBanner,
     recover,
     h('div', { class: 'search' }, icon('search'), search),
     chips,
@@ -273,7 +280,7 @@ function menuSheet() {
         { class: 'actions' },
         act('users', 'Familia e iglesia', 'Grupos para compartir prédicas', () => go('/grupos')),
         act('bell', 'Recordatorios', 'Tu devocional cada mañana', notificationsSheet),
-        act('key', 'Mi cuenta', 'Cambiar contraseña', () => accountSheet(state.me)),
+        act('key', 'Mi cuenta', 'Tu nombre y contraseña', () => accountSheet(state.me, (u) => Object.assign(state.me, u))),
         act('share', 'Instalar en el teléfono', 'iPhone, Android y cualquier navegador', installSheet),
         state.me?.isAdmin ? act('users', 'Cuentas', 'Crear cuentas y restablecer contraseñas', adminSheet) : null,
         act(

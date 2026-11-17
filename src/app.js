@@ -9,6 +9,7 @@ import { pipeline as pump } from 'node:stream/promises';
 import { audioDir, config } from './config.js';
 import { indexNote } from './db.js';
 import * as auth from './lib/auth.js';
+import { accessOf, isBillable } from './lib/billing.js';
 import { BIBLE_VERSION, getPassage, parseRef } from './lib/bible.js';
 import * as exp from './lib/exporters.js';
 import { youtubeId } from './lib/media.js';
@@ -108,6 +109,11 @@ export function buildApp({ db, queue, logger = false, push = null }) {
     const user = auth.sessionUser(db, req.cookies[auth.COOKIE]);
     if (!user) return reply.code(401).send({ error: 'Inicia sesión' });
     req.user = user;
+    // Plan vencido o cuenta en pausa: solo se frenan las funciones que cuestan dinero.
+    if (isBillable(req.method, route)) {
+      const acc = accessOf(user);
+      if (acc.state === 'blocked') return reply.code(402).send({ error: acc.message, billing: acc });
+    }
   });
 
   app.get('/api/health', async () => ({ ok: true, transcription: availableProvider() || 'sin-llave', ai: Boolean(process.env.ANTHROPIC_API_KEY) }));
@@ -124,7 +130,7 @@ export function buildApp({ db, queue, logger = false, push = null }) {
     auth.loginSucceeded(ip);
     const { token, maxAge } = auth.createSession(db, user.id);
     reply.setCookie(auth.COOKIE, token, { path: '/', httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, maxAge });
-    return { user: { id: user.id, username: user.username, isAdmin: user.is_admin } };
+    return { user: { id: user.id, username: user.username, displayName: user.display_name || '', isAdmin: Boolean(user.is_admin) } };
   });
 
   app.post('/api/logout', async (req, reply) => {
@@ -144,7 +150,13 @@ export function buildApp({ db, queue, logger = false, push = null }) {
   const brandDir = () => path.join(config.dataDir, 'brand');
   const LOGO_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 
-  app.get('/api/me', async (req) => ({ user: req.user, bible: BIBLE_VERSION, brand: brandOf(req.user.id) }));
+  const publicUser = (u) => ({ id: u.id, username: u.username, displayName: u.displayName || '', isAdmin: Boolean(u.isAdmin) });
+  app.get('/api/me', async (req) => ({ user: publicUser(req.user), account: accessOf(req.user), bible: BIBLE_VERSION, brand: brandOf(req.user.id) }));
+  app.put('/api/me/profile', async (req) => {
+    const name = String(req.body?.displayName ?? '').trim().slice(0, 40);
+    db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(name, req.user.id);
+    return { displayName: name };
+  });
 
   // --- Mi marca: nombre, usuario de redes y logo para las imágenes -------------
   app.put('/api/me/brand', async (req) => {
@@ -789,12 +801,16 @@ export function buildApp({ db, queue, logger = false, push = null }) {
     if (!adminOnly(req, reply)) return;
     return db
       .prepare(
-        `SELECT u.id, u.username, u.is_admin AS isAdmin, u.created_at AS createdAt,
+        `SELECT u.id, u.username, u.display_name AS displayName, u.is_admin AS isAdmin, u.is_admin, u.plan, u.status, u.paid_until, u.created_at AS createdAt,
           (SELECT count(*) FROM notes n WHERE n.user_id = u.id) AS notes,
           (SELECT max(s.expires_at) FROM sessions s WHERE s.user_id = u.id) AS lastSession
          FROM users u ORDER BY u.id`,
       )
-      .all();
+      .all()
+      .map((u) => {
+        const { is_admin, paid_until, ...rest } = u;
+        return { ...rest, isAdmin: Boolean(u.isAdmin), paidUntil: paid_until, account: accessOf(u) };
+      });
   });
   app.post('/api/admin/users', async (req, reply) => {
     if (!adminOnly(req, reply)) return;
@@ -805,6 +821,63 @@ export function buildApp({ db, queue, logger = false, push = null }) {
     const { lastInsertRowid } = db.prepare('INSERT INTO users (username, pass_hash) VALUES (?, ?)').run(username, auth.hashPassword(password));
     return { id: Number(lastInsertRowid), username, password };
   });
+  app.patch('/api/admin/users/:id', async (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    if (!u) return reply.code(404).send({ error: 'No existe' });
+    const b = req.body || {};
+    const next = { username: u.username, display_name: u.display_name, is_admin: u.is_admin, status: u.status, plan: u.plan, paid_until: u.paid_until };
+    if (b.username !== undefined) {
+      const un = String(b.username).trim().toLowerCase();
+      if (!/^[a-z0-9._-]{2,30}$/.test(un)) return reply.code(400).send({ error: 'Usuario de 2 a 30 letras o números, sin espacios' });
+      if (un !== u.username && db.prepare('SELECT 1 FROM users WHERE username = ?').get(un)) return reply.code(409).send({ error: 'Ese usuario ya existe' });
+      next.username = un;
+    }
+    if (b.displayName !== undefined) next.display_name = String(b.displayName).trim().slice(0, 40);
+    if (b.plan !== undefined) next.plan = String(b.plan).trim().slice(0, 30) || 'familia';
+    if (b.paidUntil !== undefined) {
+      if (b.paidUntil && !/^\d{4}-\d{2}-\d{2}$/.test(b.paidUntil)) return reply.code(400).send({ error: 'Fecha inválida' });
+      next.paid_until = b.paidUntil || '';
+    }
+    if (b.status !== undefined) {
+      if (!['active', 'suspended'].includes(b.status)) return reply.code(400).send({ error: 'Estado inválido' });
+      if (u.id === req.user.id && b.status === 'suspended') return reply.code(400).send({ error: 'No puedes pausar tu propia cuenta' });
+      next.status = b.status;
+    }
+    if (b.isAdmin !== undefined) {
+      next.is_admin = b.isAdmin ? 1 : 0;
+      if (!next.is_admin && u.is_admin && db.prepare('SELECT count(*) AS n FROM users WHERE is_admin = 1').get().n <= 1) {
+        return reply.code(400).send({ error: 'Debe quedar al menos un administrador' });
+      }
+    }
+    db.prepare(
+      'UPDATE users SET username = @username, display_name = @display_name, is_admin = @is_admin, status = @status, plan = @plan, paid_until = @paid_until WHERE id = @id',
+    ).run({ ...next, id: u.id });
+    const out = db.prepare('SELECT * FROM users WHERE id = ?').get(u.id);
+    return { id: out.id, username: out.username, displayName: out.display_name, isAdmin: Boolean(out.is_admin), plan: out.plan, status: out.status, paidUntil: out.paid_until, account: accessOf(out) };
+  });
+
+  // Eliminar una cuenta borra sus notas, audios, conversaciones y logo. No se puede deshacer.
+  app.delete('/api/admin/users/:id', async (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    if (!u) return reply.code(404).send({ error: 'No existe' });
+    if (u.id === req.user.id) return reply.code(400).send({ error: 'No puedes eliminar tu propia cuenta' });
+    if (String(req.body?.confirm || '') !== u.username) return reply.code(400).send({ error: `Escribe "${u.username}" para confirmar` });
+    const notes = db.prepare('SELECT id FROM notes WHERE user_id = ?').all(u.id).map((r) => r.id);
+    const files = fs.existsSync(audioDir()) ? fs.readdirSync(audioDir()) : [];
+    for (const id of notes) for (const f of files) if (f.startsWith(`${id}.`) || f.startsWith(`${id}-`)) fs.rmSync(path.join(audioDir(), f), { force: true });
+    for (const f of fs.existsSync(brandDir()) ? fs.readdirSync(brandDir()) : []) if (f.startsWith(`${u.id}.`)) fs.rmSync(path.join(brandDir(), f), { force: true });
+    db.transaction(() => {
+      for (const id of notes) db.prepare('DELETE FROM notes_fts WHERE note_id = ?').run(id);
+      db.prepare('DELETE FROM notes WHERE user_id = ?').run(u.id);
+      db.prepare('DELETE FROM folders WHERE user_id = ?').run(u.id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+      db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
+    })();
+    return { ok: true, deletedNotes: notes.length };
+  });
+
   app.post('/api/admin/users/:id/reset', async (req, reply) => {
     if (!adminOnly(req, reply)) return;
     const u = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.id);

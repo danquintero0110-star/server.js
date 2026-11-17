@@ -611,3 +611,10 @@ textarea.input { height: auto; padding: 14px 18px; resize: none; }
 .install-alt { padding: 12px 16px; }
 .install-alt summary { cursor: pointer; font-weight: 700; font-size: 14.5px; }
 .install-alt .install-steps li { background: var(--bg-2); }
+
+/* Cuentas y planes */
+.danger-btn { color: var(--rose); border-color: color-mix(in oklab, var(--rose) 40%, transparent); }
+.banner.plan-blocked { background: color-mix(in oklab, var(--rose) 14%, var(--surface)); border-color: color-mix(in oklab, var(--rose) 40%, transparent); }
+.banner.plan-blocked svg { color: var(--rose); }
+.row-item .status { margin-top: 6px; }
+.check.toggle input:checked + span { color: var(--text); text-decoration: none; }

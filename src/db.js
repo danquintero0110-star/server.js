@@ -127,6 +127,11 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   last_daily TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`);
+  // Perfil y plan de cada cuenta.
+  if (!cols('users').includes('display_name')) db.exec("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
+  if (!cols('users').includes('plan')) db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'familia'");
+  if (!cols('users').includes('status')) db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  if (!cols('users').includes('paid_until')) db.exec("ALTER TABLE users ADD COLUMN paid_until TEXT NOT NULL DEFAULT ''");
   // Lo creado antes de haber varias cuentas pertenece a la primera cuenta.
   const first = db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get();
   if (first) {
