@@ -2,6 +2,7 @@
 // con el logo y el nombre del negocio de cada persona. Todo se dibuja en el teléfono (sin costo).
 import { api } from './api.js';
 import { h, icon, toast, vibrate } from './ui.js';
+import { brandOptions } from './social.js';
 
 const FORMATS = [
   { key: 'story', label: 'Estado / Historia', w: 1080, h: 1920 },
@@ -227,6 +228,17 @@ export async function openStudio({ note, phrases, start = 0, me }) {
     document.fonts?.load('600 40px Manrope'),
   ]).catch(() => {});
   let logo = await loadLogo(brand);
+  // Marcas: la mía y la de mis iglesias.
+  const brands = await brandOptions().catch(() => []);
+  let brandKey = localStorage.getItem('selah-studio-brand') || 'me';
+  if (!brands.some((b) => b.key === brandKey)) brandKey = 'me';
+  const groupLogos = new Map();
+  async function groupLogo(b) {
+    if (!b?.logoUrl) return null;
+    if (!groupLogos.has(b.key)) groupLogos.set(b.key, fetch(b.logoUrl, { credentials: 'same-origin' }).then((r) => (r.ok ? r.blob().then((x) => createImageBitmap(x)) : null)).catch(() => null));
+    return groupLogos.get(b.key);
+  }
+  let activeLogo = brandKey === 'me' ? logo : await groupLogo(brands.find((b) => b.key === brandKey));
   const st = {
     i: Math.min(start, phrases.length - 1),
     format: localStorage.getItem('selah-studio-format') || 'story',
@@ -245,9 +257,9 @@ export async function openStudio({ note, phrases, start = 0, me }) {
       eyebrow: phrases[st.i]?.label,
       author: st.showAuthor ? note.preacher : '',
       title: st.showAuthor ? note.title : '',
-      logo: st.showLogo ? logo : null,
-      brandName: st.showLogo ? brand.name : '',
-      handle: st.showLogo ? brand.handle : '',
+      logo: st.showLogo ? (brandKey === 'me' ? logo : activeLogo) : null,
+      brandName: st.showLogo ? (brandKey === 'me' ? brand.name : brands.find((b) => b.key === brandKey)?.name) : '',
+      handle: st.showLogo ? (brandKey === 'me' ? brand.handle : brands.find((b) => b.key === brandKey)?.handle) : '',
     });
 
   const textArea = h('textarea', { class: 'input st-text', rows: 3 });
@@ -303,6 +315,21 @@ export async function openStudio({ note, phrases, start = 0, me }) {
       ),
     );
   const formats = seg(FORMATS.map((f) => [f.key, f.label]), () => st.format, (k) => (st.format = k, localStorage.setItem('selah-studio-format', k)));
+  const brandSeg =
+    brands.length > 1
+      ? seg(
+          brands.map((b) => [b.key, b.label]),
+          () => brandKey,
+          (k) => {
+            brandKey = k;
+            localStorage.setItem('selah-studio-brand', k);
+            groupLogo(brands.find((b) => b.key === k)).then((l) => {
+              activeLogo = k === 'me' ? logo : l;
+              draw();
+            });
+          },
+        )
+      : null;
   const styles = seg(Object.entries(STYLES).map(([k, s]) => [k, s.label, s.swatch]), () => st.style, (k) => (st.style = k, localStorage.setItem('selah-studio-style', k)), 'swatches');
 
   // Mi marca
@@ -401,6 +428,7 @@ export async function openStudio({ note, phrases, start = 0, me }) {
       textArea,
       formats,
       styles,
+      brandSeg,
       h(
         'details',
         { class: 'st-brand card', open: !brand.logo && !brand.name ? true : null },

@@ -83,9 +83,54 @@ function migrate(db) {
   // Marca personal (logo y nombre del negocio) para las imágenes.
   if (!cols('users').includes('brand_json')) db.exec("ALTER TABLE users ADD COLUMN brand_json TEXT NOT NULL DEFAULT '{}'");
   db.exec('CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, preached_at DESC)');
+  if (!cols('users').includes('is_admin')) db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
+  // Plática por persona: en una nota compartida cada quien tiene su propia conversación.
+  if (!cols('chat_messages').includes('user_id')) {
+    db.exec('ALTER TABLE chat_messages ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE');
+    db.exec('UPDATE chat_messages SET user_id = (SELECT user_id FROM notes WHERE notes.id = chat_messages.note_id) WHERE user_id IS NULL');
+  }
+  // Grupos (familia o iglesia) para compartir prédicas.
+  db.exec(`
+CREATE TABLE IF NOT EXISTS groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'familia',
+  code TEXT NOT NULL UNIQUE,
+  brand_json TEXT NOT NULL DEFAULT '{}',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS group_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'miembro',
+  joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (group_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS group_members_user ON group_members(user_id);
+CREATE TABLE IF NOT EXISTS note_shares (
+  note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  shared_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  shared_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (note_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS note_shares_group ON note_shares(group_id);
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  keys_json TEXT NOT NULL,
+  hour INTEGER NOT NULL DEFAULT 7,
+  tz TEXT NOT NULL DEFAULT 'America/Mexico_City',
+  daily INTEGER NOT NULL DEFAULT 1,
+  last_daily TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
   // Lo creado antes de haber varias cuentas pertenece a la primera cuenta.
   const first = db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get();
   if (first) {
+    if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(first.id);
     db.prepare('UPDATE notes SET user_id = ? WHERE user_id IS NULL').run(first.id);
     db.prepare('UPDATE folders SET user_id = ? WHERE user_id IS NULL').run(first.id);
   }

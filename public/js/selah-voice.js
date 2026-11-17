@@ -579,7 +579,8 @@ export function voicePanel(note, { me, pauseAudio }) {
   if (!V.canSpeak()) return h('p', { class: 'muted' }, 'Tu navegador no permite que Selah hable. Prueba con Chrome actualizado.');
   V.setNoteContext(note.id);
   const a = note.analysis;
-  const day = dayForToday(note);
+  const linkDay = Number(new URLSearchParams(location.search).get('dia')) || 0;
+  const day = (note.analysis.devotional || []).some((d) => d.day === linkDay) ? linkDay : dayForToday(note);
   const memKey = Number(localStorage.getItem(`selah-mem-${note.id}`)) || 0;
   const open = (fn) => () => {
     pauseAudio?.();

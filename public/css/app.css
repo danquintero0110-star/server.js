@@ -573,3 +573,30 @@ textarea.input { height: auto; padding: 14px 18px; resize: none; }
 .v-voice-pick small { color: var(--text-2); font-size: 12.5px; }
 .v-voice .icon-btn.small { width: 38px; height: 38px; }
 .v-voice-cur { margin-left: auto; font-weight: 700; color: var(--amber-2); font-size: 13.5px; }
+
+/* ---------- Grupos, cuenta, compartir ---------- */
+.stack { display: grid; gap: 10px; }
+.action-sub { display: block; color: var(--text-2); font-size: 12.5px; font-weight: 500; margin-top: 2px; }
+.row-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); width: 100%; text-align: left; }
+.row-item small { display: block; color: var(--text-2); font-size: 12.5px; margin-top: 2px; }
+.row-item[disabled] { opacity: 0.55; }
+.share-row.on { border-color: var(--amber); background: var(--glow); }
+.share-check { width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--line-2); display: grid; place-items: center; color: var(--on-amber); flex-shrink: 0; }
+.share-row.on .share-check { background: var(--amber); border-color: var(--amber); }
+.share-check svg { width: 16px; }
+.group-card { width: 100%; display: grid; grid-template-columns: 48px 1fr auto; gap: 14px; align-items: center; text-align: left; padding: 16px; }
+.group-card b { display: block; font: 400 20px/1.2 var(--serif); }
+.group-card small { color: var(--text-2); font-size: 13px; }
+.group-card > svg { width: 18px; color: var(--text-3); }
+.g-ic { width: 48px; height: 48px; border-radius: 16px; display: grid; place-items: center; background: var(--glow); color: var(--amber-2); }
+.g-ic.iglesia { background: color-mix(in oklab, #8fd3e8 18%, var(--surface)); color: #8fd3e8; }
+.g-ic svg { width: 24px; }
+.invite { margin-top: 14px; padding: 16px; display: grid; gap: 6px; justify-items: start; }
+.invite small { color: var(--text-2); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 800; }
+.invite .code { font: 400 34px/1 var(--serif); letter-spacing: 0.18em; color: var(--amber-2); }
+.invite .export-row { width: 100%; margin-top: 8px; }
+.creds { padding: 14px; margin: 10px 0; display: grid; gap: 8px; }
+.creds code { font-weight: 800; color: var(--amber-2); font-size: 15px; }
+.shared-tag { display: inline-flex; align-items: center; gap: 4px; color: var(--amber-2); font-weight: 700; }
+.shared-tag svg { width: 14px; }
+.danger-text { color: var(--rose); border-color: color-mix(in oklab, var(--rose) 40%, transparent); }

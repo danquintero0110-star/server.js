@@ -1,6 +1,6 @@
 // Service worker: interfaz disponible sin conexión; la API siempre va a la red.
-const VERSION = 'selah-v10';
-const SHELL = ['/', '/css/app.css', '/js/app.js', '/js/ui.js', '/js/api.js', '/js/recorder.js', '/js/voice.js', '/js/selah-voice.js', '/js/focus.js', '/js/studio.js', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png'];
+const VERSION = 'selah-v11';
+const SHELL = ['/', '/css/app.css', '/js/app.js', '/js/ui.js', '/js/api.js', '/js/recorder.js', '/js/voice.js', '/js/selah-voice.js', '/js/focus.js', '/js/studio.js', '/js/social.js', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -28,5 +28,37 @@ self.addEventListener('fetch', (e) => {
         return res;
       })
       .catch(() => caches.match(e.request)),
+  );
+});
+
+// Notificaciones: devocional del día y prédicas compartidas.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try {
+    d = e.data ? e.data.json() : {};
+  } catch {
+    d = { body: e.data?.text() };
+  }
+  e.waitUntil(
+    self.registration.showNotification(d.title || 'Selah', {
+      body: d.body || '',
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      tag: d.tag || undefined,
+      data: { url: d.url || '/' },
+      vibrate: [40, 60, 40],
+    }),
+  );
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data?.url || '/', self.location.origin).href;
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) {
+        if ('navigate' in c) return c.navigate(url).then((w) => (w || c).focus());
+      }
+      return self.clients.openWindow(url);
+    }),
   );
 });

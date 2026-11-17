@@ -54,7 +54,8 @@ function serializeNote(n, { full = false } = {}) {
   };
 }
 
-export function buildApp({ db, queue, logger = false }) {
+export function buildApp({ db, queue, logger = false, push = null }) {
+  const notifyUsers = push ? (ids, msg) => push.notifyUsers(ids, msg).catch(() => {}) : null;
   const app = Fastify({ logger, bodyLimit: 1024 * 1024, trustProxy: '127.0.0.1' });
   app.register(fastifyCookie);
   app.register(fastifyMultipart, { limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 1 } });
@@ -69,6 +70,24 @@ export function buildApp({ db, queue, logger = false }) {
 
   // Siempre con el dueño: una persona nunca ve ni toca notas de otra.
   const getNote = (id, uid) => db.prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
+  // Ver (no editar): dueño o miembro de un grupo con el que se compartió la nota.
+  const viewNote = (id, uid) =>
+    db
+      .prepare(
+        `SELECT n.*, CASE WHEN n.user_id = @uid THEN 1 ELSE 0 END AS is_mine, ou.username AS owner_name FROM notes n
+         LEFT JOIN users ou ON ou.id = n.user_id
+         WHERE n.id = @id AND (n.user_id = @uid OR EXISTS (
+           SELECT 1 FROM note_shares s JOIN group_members m ON m.group_id = s.group_id WHERE s.note_id = n.id AND m.user_id = @uid))`,
+      )
+      .get({ id, uid });
+  const sharesOf = (noteId) =>
+    db.prepare('SELECT g.id, g.name, g.kind FROM note_shares s JOIN groups g ON g.id = s.group_id WHERE s.note_id = ? ORDER BY g.name').all(noteId);
+  const full = (n, uid) => ({
+    ...serializeNote(n, { full: true }),
+    isMine: n.user_id === uid,
+    ownerName: n.user_id === uid ? '' : n.owner_name || db.prepare('SELECT username FROM users WHERE id = ?').get(n.user_id)?.username || '',
+    shares: n.user_id === uid ? sharesOf(n.id) : [],
+  });
   const ownFolder = (fid, uid) => (fid ? db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(fid, uid)?.id || null : null);
   function createNote(req, n) {
     db.prepare(
@@ -77,7 +96,7 @@ export function buildApp({ db, queue, logger = false }) {
     ).run({ ...n, user_id: req.user.id, folder_id: ownFolder(n.folder_id, req.user.id) });
     indexNote(db, n.id);
     Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
-    return serializeNote(getNote(n.id, req.user.id), { full: true });
+    return full(getNote(n.id, req.user.id), req.user.id);
   }
 
   // --- Autenticación -------------------------------------------------------
@@ -105,7 +124,7 @@ export function buildApp({ db, queue, logger = false }) {
     auth.loginSucceeded(ip);
     const { token, maxAge } = auth.createSession(db, user.id);
     reply.setCookie(auth.COOKIE, token, { path: '/', httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, maxAge });
-    return { user: { id: user.id, username: user.username } };
+    return { user: { id: user.id, username: user.username, isAdmin: user.is_admin } };
   });
 
   app.post('/api/logout', async (req, reply) => {
@@ -216,9 +235,10 @@ export function buildApp({ db, queue, logger = false }) {
   // --- Notas ---------------------------------------------------------------
   app.get('/api/notes', async (req) => {
     const { q = '', folder = '' } = req.query;
-    const where = ['n.user_id = @uid'];
+    const visible = `(n.user_id = @uid OR n.id IN (SELECT s.note_id FROM note_shares s JOIN group_members m ON m.group_id = s.group_id WHERE m.user_id = @uid))`;
+    const where = [visible];
     const params = { uid: req.user.id };
-    let sql = 'SELECT n.* FROM notes n';
+    let sql = 'SELECT n.*, ou.username AS owner_name FROM notes n LEFT JOIN users ou ON ou.id = n.user_id';
     if (q.trim()) {
       const terms = q
         .replace(/["*^():]/g, ' ')
@@ -227,14 +247,15 @@ export function buildApp({ db, queue, logger = false }) {
         .map((t) => `"${t}"*`)
         .join(' ');
       if (terms) {
-        sql = `SELECT n.*, snippet(notes_fts, 2, '[[', ']]', '…', 14) AS snip FROM notes_fts JOIN notes n ON n.id = notes_fts.note_id`;
+        sql = `SELECT n.*, ou.username AS owner_name, snippet(notes_fts, 2, '[[', ']]', '…', 14) AS snip FROM notes_fts JOIN notes n ON n.id = notes_fts.note_id LEFT JOIN users ou ON ou.id = n.user_id`;
         where.push('notes_fts MATCH @terms');
         params.terms = terms;
       }
     }
-    if (folder === 'none') where.push('n.folder_id IS NULL');
+    if (folder === 'shared') where.push('n.user_id != @uid');
+    else if (folder === 'none') where.push('n.folder_id IS NULL AND n.user_id = @uid');
     else if (folder) {
-      where.push('n.folder_id = @folder');
+      where.push('n.folder_id = @folder AND n.user_id = @uid');
       params.folder = Number(folder);
     }
     sql += ` WHERE ${where.join(' AND ')}`;
@@ -242,7 +263,7 @@ export function buildApp({ db, queue, logger = false }) {
     return db
       .prepare(sql)
       .all(params)
-      .map((n) => ({ ...serializeNote(n), snippet: n.snip || '' }));
+      .map((n) => ({ ...serializeNote(n), snippet: n.snip || '', isMine: n.user_id === req.user.id, ownerName: n.user_id === req.user.id ? '' : n.owner_name || '' }));
   });
 
   app.post('/api/notes', async (req, reply) => {
@@ -436,9 +457,9 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   app.get('/api/notes/:id', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
-    return serializeNote(n, { full: true });
+    return full(n, req.user.id);
   });
 
   app.patch('/api/notes/:id', async (req, reply) => {
@@ -455,7 +476,7 @@ export function buildApp({ db, queue, logger = false }) {
       "UPDATE notes SET title = @title, preacher = @preacher, preached_at = @preached_at, folder_id = @folder_id, updated_at = datetime('now') WHERE id = @id",
     ).run({ ...upd, id: n.id });
     indexNote(db, n.id);
-    return serializeNote(getNote(n.id, req.user.id), { full: true });
+    return full(getNote(n.id, req.user.id), req.user.id);
   });
 
   app.delete('/api/notes/:id', async (req) => {
@@ -480,11 +501,11 @@ export function buildApp({ db, queue, logger = false }) {
       `UPDATE notes SET status = 'queued', error = '', analysis_json = ''${fromScratch ? ", transcript_json = ''" : ''} WHERE id = ?`,
     ).run(n.id);
     Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
-    return serializeNote(getNote(n.id, req.user.id), { full: true });
+    return full(getNote(n.id, req.user.id), req.user.id);
   });
 
   app.get('/api/notes/:id/audio', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n?.audio_file) return reply.code(404).send({ error: 'Sin audio' });
     reply.header('Content-Type', n.audio_mime || 'audio/mp4');
     return reply.sendFile(n.audio_file, audioDir(), { cacheControl: false, contentType: false });
@@ -499,7 +520,7 @@ export function buildApp({ db, queue, logger = false }) {
   };
 
   app.get('/api/notes/:id/export.pdf', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
     let a = JSON.parse(n.analysis_json);
     if (!a.study) {
@@ -517,7 +538,7 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   app.get('/api/notes/:id/whatsapp', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
     const a = JSON.parse(n.analysis_json);
     return { summary: exp.summaryWhatsapp(n, a), announcements: exp.announcementsWhatsapp(n, a.announcements) };
@@ -535,23 +556,23 @@ export function buildApp({ db, queue, logger = false }) {
 
   // --- Chat sobre una nota -------------------------------------------------
   app.get('/api/notes/:id/chat', async (req, reply) => {
-    if (!getNote(req.params.id, req.user.id)) return reply.code(404).send({ error: 'Nota no encontrada' });
-    return db.prepare('SELECT id, role, content, created_at FROM chat_messages WHERE note_id = ? ORDER BY id').all(req.params.id);
+    if (!viewNote(req.params.id, req.user.id)) return reply.code(404).send({ error: 'Nota no encontrada' });
+    return db.prepare('SELECT id, role, content, created_at FROM chat_messages WHERE note_id = ? AND user_id = ? ORDER BY id').all(req.params.id, req.user.id);
   });
   app.delete('/api/notes/:id/chat', async (req) => {
-    if (getNote(req.params.id, req.user.id)) db.prepare('DELETE FROM chat_messages WHERE note_id = ?').run(req.params.id);
+    if (viewNote(req.params.id, req.user.id)) db.prepare('DELETE FROM chat_messages WHERE note_id = ? AND user_id = ?').run(req.params.id, req.user.id);
     return { ok: true };
   });
 
   app.post('/api/notes/:id/chat', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n?.transcript_json) return reply.code(404).send({ error: 'La nota aún no tiene transcripción' });
     const question = String(req.body?.question || '').trim().slice(0, 2000);
     if (!question) return reply.code(400).send({ error: 'Escribe una pregunta' });
     const mode = ['voz', 'devocional'].includes(req.body?.mode) ? req.body.mode : 'texto';
     const analysisObj = n.analysis_json ? JSON.parse(n.analysis_json) : null;
     const devotionalDay = mode === 'devocional' ? (analysisObj?.devotional || []).find((d) => d.day === Number(req.body?.day)) || null : null;
-    const history = db.prepare('SELECT role, content FROM chat_messages WHERE note_id = ? ORDER BY id DESC LIMIT 20').all(n.id).reverse();
+    const history = db.prepare('SELECT role, content FROM chat_messages WHERE note_id = ? AND user_id = ? ORDER BY id DESC LIMIT 20').all(n.id, req.user.id).reverse();
 
     reply.hijack();
     const res = reply.raw;
@@ -568,10 +589,10 @@ export function buildApp({ db, queue, logger = false }) {
         devotionalDay,
         onText: (t) => send('delta', { text: t }),
       });
-      const ins = db.prepare('INSERT INTO chat_messages (note_id, role, content) VALUES (?, ?, ?)');
+      const ins = db.prepare('INSERT INTO chat_messages (note_id, role, content, user_id) VALUES (?, ?, ?, ?)');
       db.transaction(() => {
-        ins.run(n.id, 'user', question);
-        ins.run(n.id, 'assistant', out.text);
+        ins.run(n.id, 'user', question, req.user.id);
+        ins.run(n.id, 'assistant', out.text, req.user.id);
       })();
       db.prepare("UPDATE notes SET cost_json = json_set(cost_json, '$.chat', round(coalesce(json_extract(cost_json, '$.chat'), 0) + ?, 4)) WHERE id = ?").run(out.costUsd, n.id);
       send('done', { text: out.text });
@@ -584,7 +605,7 @@ export function buildApp({ db, queue, logger = false }) {
 
   // --- Enfoques: la prédica aplicada a un área ---------------------------------
   app.post('/api/notes/:id/focus', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
     const area = String(req.body?.area || '').trim();
     if (!focusKey(area)) return reply.code(400).send({ error: 'Escribe un área, por ejemplo "mi trabajo"' });
@@ -667,7 +688,7 @@ export function buildApp({ db, queue, logger = false }) {
     ttsBytesSinceClean += out.audio.length;
     if (ttsBytesSinceClean > 20 * 1048576) cleanTts();
     const noteId = String(req.body?.noteId || '');
-    if (noteId && getNote(noteId, req.user.id)) {
+    if (noteId && viewNote(noteId, req.user.id)) {
       db.prepare("UPDATE notes SET cost_json = json_set(cost_json, '$.tts', round(coalesce(json_extract(cost_json, '$.tts'), 0) + ?, 4)) WHERE id = ?").run(out.costUsd, noteId);
     }
     return reply.send(out.audio);
@@ -676,7 +697,7 @@ export function buildApp({ db, queue, logger = false }) {
   // --- Voz: escuchar lo que dice la persona (clips cortos) ---------------------
   const MAX_CLIP = 6 * 1048576;
   app.post('/api/notes/:id/listen', async (req, reply) => {
-    const n = getNote(req.params.id, req.user.id);
+    const n = viewNote(req.params.id, req.user.id);
     if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
     const stream = req.body;
     if (!stream || typeof stream.pipe !== 'function') return reply.code(400).send({ error: 'Envía el audio como application/octet-stream' });
@@ -714,6 +735,239 @@ export function buildApp({ db, queue, logger = false }) {
     } finally {
       fs.rmSync(file, { force: true });
     }
+  });
+
+  // --- Notificaciones (recordatorio diario y avisos) ---------------------------------
+  app.get('/api/push', async (req) => {
+    const rows = db.prepare('SELECT endpoint, hour, tz, daily FROM push_subscriptions WHERE user_id = ?').all(req.user.id);
+    return { available: Boolean(push), publicKey: push?.publicKey || '', subscriptions: rows.map((r) => ({ endpoint: r.endpoint, hour: r.hour, tz: r.tz, daily: Boolean(r.daily) })) };
+  });
+  app.post('/api/push/subscribe', async (req, reply) => {
+    if (!push) return reply.code(503).send({ error: 'Notificaciones no disponibles' });
+    const sub = req.body?.subscription || {};
+    const endpoint = String(sub.endpoint || '');
+    if (!/^https:\/\/[\w.-]+\//.test(endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) return reply.code(400).send({ error: 'Suscripción no válida' });
+    const hour = Math.min(23, Math.max(0, Number.parseInt(req.body?.hour ?? 7, 10) || 0));
+    const tz = String(req.body?.tz || 'America/Mexico_City').slice(0, 60);
+    db.prepare(
+      `INSERT INTO push_subscriptions (user_id, endpoint, keys_json, hour, tz, daily) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, keys_json = excluded.keys_json, hour = excluded.hour, tz = excluded.tz, daily = excluded.daily`,
+    ).run(req.user.id, endpoint, JSON.stringify({ p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) }), hour, tz, req.body?.daily === false ? 0 : 1);
+    return { ok: true };
+  });
+  app.post('/api/push/unsubscribe', async (req) => {
+    db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?').run(req.user.id, String(req.body?.endpoint || ''));
+    return { ok: true };
+  });
+  app.post('/api/push/test', async (req, reply) => {
+    if (!push) return reply.code(503).send({ error: 'Notificaciones no disponibles' });
+    await push.notifyUsers([req.user.id], { title: 'Selah', body: '¡Listo! Así te llegarán tus recordatorios. 🙏', url: '/' });
+    return { ok: true };
+  });
+
+  // --- Mi cuenta y administración ------------------------------------------------
+  app.post('/api/me/password', async (req, reply) => {
+    const { current = '', next = '' } = req.body || {};
+    const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!auth.verifyPassword(String(current), u.pass_hash)) return reply.code(400).send({ error: 'La contraseña actual no es correcta' });
+    if (String(next).length < 8) return reply.code(400).send({ error: 'La nueva contraseña debe tener al menos 8 caracteres' });
+    db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(auth.hashPassword(String(next)), u.id);
+    // Cierra las demás sesiones (otros teléfonos), conserva esta.
+    const keep = crypto.createHash('sha256').update(req.cookies[auth.COOKIE] || '').digest('hex');
+    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(u.id, keep);
+    return { ok: true };
+  });
+
+  const adminOnly = (req, reply) => {
+    if (!req.user.isAdmin) {
+      reply.code(403).send({ error: 'Solo el administrador puede hacer esto' });
+      return false;
+    }
+    return true;
+  };
+  app.get('/api/admin/users', async (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    return db
+      .prepare(
+        `SELECT u.id, u.username, u.is_admin AS isAdmin, u.created_at AS createdAt,
+          (SELECT count(*) FROM notes n WHERE n.user_id = u.id) AS notes,
+          (SELECT max(s.expires_at) FROM sessions s WHERE s.user_id = u.id) AS lastSession
+         FROM users u ORDER BY u.id`,
+      )
+      .all();
+  });
+  app.post('/api/admin/users', async (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    const username = String(req.body?.username || '').trim().toLowerCase();
+    if (!/^[a-z0-9._-]{2,30}$/.test(username)) return reply.code(400).send({ error: 'Usuario de 2 a 30 letras o números, sin espacios' });
+    if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) return reply.code(409).send({ error: 'Ese usuario ya existe' });
+    const password = auth.randomPassword();
+    const { lastInsertRowid } = db.prepare('INSERT INTO users (username, pass_hash) VALUES (?, ?)').run(username, auth.hashPassword(password));
+    return { id: Number(lastInsertRowid), username, password };
+  });
+  app.post('/api/admin/users/:id/reset', async (req, reply) => {
+    if (!adminOnly(req, reply)) return;
+    const u = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.id);
+    if (!u) return reply.code(404).send({ error: 'No existe' });
+    const password = auth.randomPassword();
+    db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(auth.hashPassword(password), u.id);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+    return { username: u.username, password };
+  });
+
+  // --- Grupos: familia o iglesia ---------------------------------------------------
+  const memberOf = (gid, uid) => db.prepare('SELECT role FROM group_members WHERE group_id = ? AND user_id = ?').get(gid, uid);
+  const newCode = () => {
+    const abc = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    for (;;) {
+      const c = Array.from(crypto.randomBytes(6), (b) => abc[b % abc.length]).join('');
+      if (!db.prepare('SELECT 1 FROM groups WHERE code = ?').get(c)) return c;
+    }
+  };
+  const groupOut = (g, uid) => {
+    const role = memberOf(g.id, uid)?.role;
+    return {
+      id: g.id,
+      name: g.name,
+      kind: g.kind,
+      role,
+      code: g.code,
+      brand: JSON.parse(g.brand_json || '{}'),
+      members: db.prepare('SELECT count(*) AS n FROM group_members WHERE group_id = ?').get(g.id).n,
+      notes: db.prepare('SELECT count(*) AS n FROM note_shares WHERE group_id = ?').get(g.id).n,
+    };
+  };
+  app.get('/api/groups', async (req) =>
+    db
+      .prepare('SELECT g.* FROM groups g JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ? ORDER BY g.name')
+      .all(req.user.id)
+      .map((g) => groupOut(g, req.user.id)),
+  );
+  app.post('/api/groups', async (req, reply) => {
+    const name = String(req.body?.name || '').trim().slice(0, 60);
+    const kind = req.body?.kind === 'iglesia' ? 'iglesia' : 'familia';
+    if (!name) return reply.code(400).send({ error: 'Escribe un nombre para el grupo' });
+    const { lastInsertRowid } = db.prepare('INSERT INTO groups (name, kind, code, created_by) VALUES (?, ?, ?, ?)').run(name, kind, newCode(), req.user.id);
+    db.prepare("INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, 'admin')").run(lastInsertRowid, req.user.id);
+    return groupOut(db.prepare('SELECT * FROM groups WHERE id = ?').get(lastInsertRowid), req.user.id);
+  });
+  app.post('/api/groups/join', async (req, reply) => {
+    const code = String(req.body?.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const g = db.prepare('SELECT * FROM groups WHERE code = ?').get(code);
+    if (!g) return reply.code(404).send({ error: 'No encontré un grupo con ese código' });
+    db.prepare("INSERT OR IGNORE INTO group_members (group_id, user_id, role) VALUES (?, ?, 'miembro')").run(g.id, req.user.id);
+    notifyUsers?.(adminsOf(g.id, req.user.id), { title: g.name, body: `${req.user.username} se unió al grupo`, url: '/grupos' });
+    return groupOut(g, req.user.id);
+  });
+  app.get('/api/groups/:id', async (req, reply) => {
+    const g = db.prepare('SELECT * FROM groups WHERE id = ?').get(req.params.id);
+    if (!g || !memberOf(g.id, req.user.id)) return reply.code(404).send({ error: 'Grupo no encontrado' });
+    return {
+      ...groupOut(g, req.user.id),
+      memberList: db
+        .prepare('SELECT u.id, u.username, m.role FROM group_members m JOIN users u ON u.id = m.user_id WHERE m.group_id = ? ORDER BY m.role, u.username')
+        .all(g.id),
+    };
+  });
+  app.patch('/api/groups/:id', async (req, reply) => {
+    const g = db.prepare('SELECT * FROM groups WHERE id = ?').get(req.params.id);
+    if (!g || memberOf(g.id, req.user.id)?.role !== 'admin') return reply.code(403).send({ error: 'Solo quien administra el grupo puede cambiarlo' });
+    const name = req.body?.name !== undefined ? String(req.body.name).trim().slice(0, 60) || g.name : g.name;
+    const brand = JSON.parse(g.brand_json || '{}');
+    if (req.body?.handle !== undefined) brand.handle = String(req.body.handle).trim().slice(0, 40);
+    db.prepare('UPDATE groups SET name = ?, brand_json = ? WHERE id = ?').run(name, JSON.stringify(brand), g.id);
+    if (req.body?.newCode) db.prepare('UPDATE groups SET code = ? WHERE id = ?').run(newCode(), g.id);
+    return groupOut(db.prepare('SELECT * FROM groups WHERE id = ?').get(g.id), req.user.id);
+  });
+  app.delete('/api/groups/:id/members/:uid', async (req, reply) => {
+    const gid = Number(req.params.id);
+    const target = Number(req.params.uid);
+    const me = memberOf(gid, req.user.id);
+    if (!me) return reply.code(404).send({ error: 'Grupo no encontrado' });
+    if (target !== req.user.id && me.role !== 'admin') return reply.code(403).send({ error: 'Solo quien administra puede quitar personas' });
+    db.prepare('DELETE FROM group_members WHERE group_id = ? AND user_id = ?').run(gid, target);
+    const left = db.prepare('SELECT count(*) AS n FROM group_members WHERE group_id = ?').get(gid).n;
+    if (!left) db.prepare('DELETE FROM groups WHERE id = ?').run(gid);
+    else if (!db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND role = 'admin'").get(gid)) {
+      // Nunca queda un grupo sin administrador.
+      db.prepare("UPDATE group_members SET role = 'admin' WHERE group_id = ? AND user_id = (SELECT user_id FROM group_members WHERE group_id = ? ORDER BY joined_at LIMIT 1)").run(gid, gid);
+    }
+    return { ok: true };
+  });
+  app.post('/api/groups/:id/members/:uid/role', async (req, reply) => {
+    const gid = Number(req.params.id);
+    if (memberOf(gid, req.user.id)?.role !== 'admin') return reply.code(403).send({ error: 'Solo quien administra puede cambiar roles' });
+    const role = req.body?.role === 'admin' ? 'admin' : 'miembro';
+    db.prepare('UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?').run(role, gid, Number(req.params.uid));
+    return { ok: true };
+  });
+  // Logo del grupo (para las imágenes de la iglesia).
+  const groupLogoName = (gid, ext) => `g${gid}.${ext}`;
+  app.post('/api/groups/:id/logo', async (req, reply) => {
+    const g = db.prepare('SELECT * FROM groups WHERE id = ?').get(req.params.id);
+    if (!g || memberOf(g.id, req.user.id)?.role !== 'admin') return reply.code(403).send({ error: 'Solo quien administra el grupo puede cambiar el logo' });
+    const ext = LOGO_TYPES[String(req.headers['x-image-mime'] || '').split(';')[0]];
+    if (!ext) return reply.code(400).send({ error: 'El logo debe ser PNG, JPG o WEBP' });
+    fs.mkdirSync(brandDir(), { recursive: true });
+    const file = path.join(brandDir(), groupLogoName(g.id, ext));
+    const tmp = `${file}.tmp`;
+    try {
+      let size = 0;
+      await pump(
+        req.body,
+        async function* (src) {
+          for await (const c of src) {
+            size += c.length;
+            if (size > 2 * 1048576) throw Object.assign(new Error('El logo debe pesar menos de 2 MB'), { statusCode: 413 });
+            yield c;
+          }
+        },
+        fs.createWriteStream(tmp),
+      );
+      for (const e of Object.values(LOGO_TYPES)) fs.rmSync(path.join(brandDir(), groupLogoName(g.id, e)), { force: true });
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      fs.rmSync(tmp, { force: true });
+      if (e.statusCode === 413) return reply.code(413).send({ error: e.message });
+      throw e;
+    }
+    const brand = JSON.parse(g.brand_json || '{}');
+    brand.logo = `${ext}:${Date.now()}`;
+    db.prepare('UPDATE groups SET brand_json = ? WHERE id = ?').run(JSON.stringify(brand), g.id);
+    return groupOut(db.prepare('SELECT * FROM groups WHERE id = ?').get(g.id), req.user.id);
+  });
+  app.get('/api/groups/:id/logo', async (req, reply) => {
+    const g = db.prepare('SELECT * FROM groups WHERE id = ?').get(req.params.id);
+    if (!g || !memberOf(g.id, req.user.id)) return reply.code(404).send({ error: 'Sin logo' });
+    const ext = String(JSON.parse(g.brand_json || '{}').logo || '').split(':')[0];
+    if (!Object.values(LOGO_TYPES).includes(ext) || !fs.existsSync(path.join(brandDir(), groupLogoName(g.id, ext)))) return reply.code(404).send({ error: 'Sin logo' });
+    reply.header('Cache-Control', 'private, max-age=600');
+    return reply.sendFile(groupLogoName(g.id, ext), brandDir(), { cacheControl: false });
+  });
+
+  // --- Compartir una prédica con un grupo -------------------------------------------
+  const adminsOf = (gid, exceptUid) =>
+    db.prepare("SELECT user_id FROM group_members WHERE group_id = ? AND role = 'admin' AND user_id != ?").all(gid, exceptUid).map((r) => r.user_id);
+  app.post('/api/notes/:id/share', async (req, reply) => {
+    const n = getNote(req.params.id, req.user.id);
+    if (!n) return reply.code(404).send({ error: 'Solo puedes compartir tus propias notas' });
+    const gid = Number(req.body?.groupId);
+    const g = db.prepare('SELECT * FROM groups WHERE id = ?').get(gid);
+    const role = g && memberOf(g.id, req.user.id)?.role;
+    if (!role) return reply.code(404).send({ error: 'Grupo no encontrado' });
+    if (g.kind === 'iglesia' && role !== 'admin') return reply.code(403).send({ error: 'En un grupo de iglesia solo quien administra puede compartir prédicas' });
+    const r = db.prepare('INSERT OR IGNORE INTO note_shares (note_id, group_id, shared_by) VALUES (?, ?, ?)').run(n.id, g.id, req.user.id);
+    if (r.changes) {
+      const to = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?').all(g.id, req.user.id).map((x) => x.user_id);
+      notifyUsers?.(to, { title: `${g.name}: nueva prédica`, body: `${req.user.username} compartió «${n.title || 'una prédica'}»`, url: `/nota/${n.id}` });
+    }
+    return { shares: sharesOf(n.id) };
+  });
+  app.delete('/api/notes/:id/share/:gid', async (req, reply) => {
+    const n = getNote(req.params.id, req.user.id);
+    if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
+    db.prepare('DELETE FROM note_shares WHERE note_id = ? AND group_id = ?').run(n.id, Number(req.params.gid));
+    return { shares: sharesOf(n.id) };
   });
 
   // --- SPA -----------------------------------------------------------------

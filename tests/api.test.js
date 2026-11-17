@@ -9,10 +9,13 @@ import { buildApp } from '../src/app.js';
 import { createQueue, deps } from '../src/lib/pipeline.js';
 import { hashPassword } from '../src/lib/auth.js';
 import { setClient } from '../src/providers/ai.js';
+import { createPush, devotionalDay, localNow } from '../src/lib/push.js';
 
 const db = openDb(path.join(dataDir, 'selah.db'), { bibleFile: config.bibleFile });
 const queue = createQueue(db, { log: { error() {}, warn() {} } });
-const app = buildApp({ db, queue });
+const pushSent = [];
+const push = createPush(db, { log: { warn() {}, error() {} }, send: async (sub, payload) => pushSent.push({ endpoint: sub.endpoint, ...JSON.parse(payload) }) });
+const app = buildApp({ db, queue, push });
 const anthropic = fakeAnthropic();
 let cookie = '';
 
@@ -51,7 +54,7 @@ function multipart(fields, file) {
 
 before(async () => {
   setClient(anthropic);
-  db.prepare('INSERT INTO users (username, pass_hash) VALUES (?, ?)').run('danny', hashPassword('clave-de-prueba'));
+  db.prepare('INSERT INTO users (username, pass_hash, is_admin) VALUES (?, ?, 1)').run('danny', hashPassword('clave-de-prueba'));
   await app.ready();
 });
 after(() => app.close());
@@ -434,6 +437,123 @@ test('cuentas separadas: nadie ve ni toca notas, carpetas ni subidas de otro', a
   const st = (await app.inject({ method: 'POST', url: '/api/uploads', headers: { cookie: other }, payload: { size: 10, mime: 'audio/webm', folderId: f.id } })).json();
   assert.equal((await app.inject({ url: `/api/uploads/${st.id}`, headers: { cookie } })).statusCode, 404, 'subida ajena invisible');
   await app.inject({ method: 'DELETE', url: `/api/uploads/${st.id}`, headers: { cookie: other } });
+});
+
+test('cuenta: cambiar contraseña y administración de cuentas', async () => {
+  const me = (await app.inject({ url: '/api/me', headers: { cookie } })).json();
+  assert.equal(me.user.isAdmin, 1, 'la primera cuenta es administradora');
+  const bad = await app.inject({ method: 'POST', url: '/api/me/password', headers: { cookie }, payload: { current: 'mala', next: 'nueva-clave-123' } });
+  assert.equal(bad.statusCode, 400);
+  const short = await app.inject({ method: 'POST', url: '/api/me/password', headers: { cookie }, payload: { current: 'clave-de-prueba', next: 'corta' } });
+  assert.equal(short.statusCode, 400);
+  const ok = await app.inject({ method: 'POST', url: '/api/me/password', headers: { cookie }, payload: { current: 'clave-de-prueba', next: 'nueva-clave-123' } });
+  assert.equal(ok.statusCode, 200);
+  assert.equal((await app.inject({ url: '/api/me', headers: { cookie } })).statusCode, 200, 'esta sesión sigue abierta');
+  const relog = await app.inject({ method: 'POST', url: '/api/login', payload: { username: 'danny', password: 'nueva-clave-123' } });
+  assert.equal(relog.statusCode, 200);
+  // Admin crea y restablece cuentas.
+  const created = (await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie }, payload: { username: 'Mama' } })).json();
+  assert.equal(created.username, 'mama');
+  assert.ok(created.password.length >= 10);
+  assert.equal((await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie }, payload: { username: 'mama' } })).statusCode, 409);
+  const login = await app.inject({ method: 'POST', url: '/api/login', payload: { username: 'mama', password: created.password } });
+  assert.equal(login.statusCode, 200);
+  const mamaCookie = login.headers['set-cookie'].split(';')[0];
+  assert.equal((await app.inject({ url: '/api/admin/users', headers: { cookie: mamaCookie } })).statusCode, 403, 'no-admin no administra');
+  const reset = (await app.inject({ method: 'POST', url: `/api/admin/users/${created.id}/reset`, headers: { cookie } })).json();
+  assert.notEqual(reset.password, created.password);
+  assert.equal((await app.inject({ url: '/api/me', headers: { cookie: mamaCookie } })).statusCode, 401, 'el restablecimiento cierra sus sesiones');
+  const list = (await app.inject({ url: '/api/admin/users', headers: { cookie } })).json();
+  assert.ok(list.some((u) => u.username === 'mama'));
+});
+
+test('grupos: familia e iglesia, compartir prédicas, plática por persona y avisos', async () => {
+  const loginAs = async (u, p) => (await app.inject({ method: 'POST', url: '/api/login', payload: { username: u, password: p } })).headers['set-cookie'].split(';')[0];
+  const pw = (await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie }, payload: { username: 'papa' } })).json().password;
+  const papa = await loginAs('papa', pw);
+  const pw2 = (await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie }, payload: { username: 'eli' } })).json().password;
+  const eli = await loginAs('eli', pw2);
+  // Papá activa notificaciones.
+  const sub = { endpoint: 'https://fcm.googleapis.com/fcm/send/papa1', keys: { p256dh: 'k', auth: 'a' } };
+  assert.equal((await app.inject({ method: 'POST', url: '/api/push/subscribe', headers: { cookie: papa }, payload: { subscription: sub, hour: 7, tz: 'America/Mexico_City' } })).statusCode, 200);
+  // Familia
+  const fam = (await app.inject({ method: 'POST', url: '/api/groups', headers: { cookie }, payload: { name: 'Familia Quintero', kind: 'familia' } })).json();
+  assert.equal(fam.role, 'admin');
+  assert.match(fam.code, /^[A-Z0-9]{6}$/);
+  assert.equal((await app.inject({ method: 'POST', url: '/api/groups/join', headers: { cookie: papa }, payload: { code: 'nope00' } })).statusCode, 404);
+  const joined = (await app.inject({ method: 'POST', url: '/api/groups/join', headers: { cookie: papa }, payload: { code: fam.code.toLowerCase() } })).json();
+  assert.equal(joined.role, 'miembro');
+  const notes = (await app.inject({ url: '/api/notes', headers: { cookie } })).json().filter((n) => n.isMine);
+  const id = notes[0].id;
+  assert.equal((await app.inject({ url: `/api/notes/${id}`, headers: { cookie: papa } })).statusCode, 404, 'antes de compartir no la ve');
+  pushSent.length = 0;
+  const sh = (await app.inject({ method: 'POST', url: `/api/notes/${id}/share`, headers: { cookie }, payload: { groupId: fam.id } })).json();
+  assert.deepEqual(sh.shares.map((g) => g.name), ['Familia Quintero']);
+  assert.equal(pushSent.length, 1, 'papá recibe aviso de la prédica nueva');
+  assert.match(pushSent[0].body, /compartió/);
+  const seen = (await app.inject({ url: `/api/notes/${id}`, headers: { cookie: papa } })).json();
+  assert.equal(seen.isMine, false);
+  assert.equal(seen.ownerName, 'danny');
+  assert.ok((await app.inject({ url: '/api/notes', headers: { cookie: papa } })).json().some((n) => n.id === id && !n.isMine));
+  assert.ok((await app.inject({ url: '/api/notes?folder=shared', headers: { cookie: papa } })).json().some((n) => n.id === id));
+  assert.equal((await app.inject({ url: `/api/notes/${id}/export.pdf`, headers: { cookie: papa } })).statusCode, 200);
+  assert.equal((await app.inject({ url: `/api/notes/${id}`, headers: { cookie: eli } })).statusCode, 404, 'quien no está en el grupo no la ve');
+  // Papá no puede editar, borrar ni re-compartir.
+  assert.equal((await app.inject({ method: 'PATCH', url: `/api/notes/${id}`, headers: { cookie: papa }, payload: { title: 'x' } })).statusCode, 404);
+  await app.inject({ method: 'DELETE', url: `/api/notes/${id}`, headers: { cookie: papa } });
+  assert.equal((await app.inject({ url: `/api/notes/${id}`, headers: { cookie } })).statusCode, 200);
+  assert.equal((await app.inject({ method: 'POST', url: `/api/notes/${id}/share`, headers: { cookie: papa }, payload: { groupId: fam.id } })).statusCode, 404);
+  // Cada quien su propia plática.
+  await app.inject({ method: 'POST', url: `/api/notes/${id}/chat`, headers: { cookie: papa }, payload: { question: 'Pregunta de papá' } });
+  const papaChat = (await app.inject({ url: `/api/notes/${id}/chat`, headers: { cookie: papa } })).json();
+  assert.ok(papaChat.some((m) => m.content === 'Pregunta de papá'));
+  const myChat = (await app.inject({ url: `/api/notes/${id}/chat`, headers: { cookie } })).json();
+  assert.ok(!myChat.some((m) => m.content === 'Pregunta de papá'));
+  // Iglesia: solo administradores comparten.
+  const igl = (await app.inject({ method: 'POST', url: '/api/groups', headers: { cookie: papa }, payload: { name: 'Casa de Fe', kind: 'iglesia' } })).json();
+  await app.inject({ method: 'POST', url: '/api/groups/join', headers: { cookie }, payload: { code: igl.code } });
+  assert.equal((await app.inject({ method: 'POST', url: `/api/notes/${id}/share`, headers: { cookie }, payload: { groupId: igl.id } })).statusCode, 403);
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  assert.equal((await app.inject({ method: 'POST', url: `/api/groups/${igl.id}/logo`, headers: { cookie, 'content-type': 'application/octet-stream', 'x-image-mime': 'image/png' }, body: png })).statusCode, 403);
+  assert.equal((await app.inject({ method: 'POST', url: `/api/groups/${igl.id}/logo`, headers: { cookie: papa, 'content-type': 'application/octet-stream', 'x-image-mime': 'image/png' }, body: png })).statusCode, 200);
+  assert.equal((await app.inject({ url: `/api/groups/${igl.id}/logo`, headers: { cookie } })).statusCode, 200, 'los miembros ven el logo de la iglesia');
+  assert.equal((await app.inject({ url: `/api/groups/${igl.id}/logo`, headers: { cookie: eli } })).statusCode, 404);
+  // Salir del grupo: deja de verla. El último admin que sale deja a otro como admin.
+  await app.inject({ method: 'DELETE', url: `/api/groups/${igl.id}/members/${(await app.inject({ url: '/api/me', headers: { cookie: papa } })).json().user.id}`, headers: { cookie: papa } });
+  const igl2 = (await app.inject({ url: `/api/groups/${igl.id}`, headers: { cookie } })).json();
+  assert.equal(igl2.role, 'admin');
+  await app.inject({ method: 'DELETE', url: `/api/notes/${id}/share/${fam.id}`, headers: { cookie } });
+  assert.equal((await app.inject({ url: `/api/notes/${id}`, headers: { cookie: papa } })).statusCode, 404, 'al dejar de compartir ya no la ve');
+});
+
+test('recordatorio diario del devocional', async () => {
+  assert.equal(devotionalDay('2026-11-15', '2026-11-16'), 1);
+  assert.equal(devotionalDay('2026-11-15', '2026-11-20'), 5);
+  assert.equal(devotionalDay('2026-11-15', '2026-11-21'), null);
+  assert.equal(devotionalDay('2026-11-15', '2026-11-15'), null);
+  assert.deepEqual(localNow('America/Mexico_City', new Date('2026-11-17T13:30:00Z')), { date: '2026-11-17', hour: 7 });
+  const sub = { endpoint: 'https://fcm.googleapis.com/fcm/send/danny1', keys: { p256dh: 'k', auth: 'a' } };
+  await app.inject({ method: 'POST', url: '/api/push/subscribe', headers: { cookie }, payload: { subscription: sub, hour: 7, tz: 'America/Mexico_City' } });
+  const st = (await app.inject({ url: '/api/push', headers: { cookie } })).json();
+  assert.ok(st.available && st.publicKey.length > 40);
+  assert.ok(st.subscriptions.some((x) => x.endpoint === sub.endpoint));
+  // Nota predicada hace 2 días → día 2.
+  const n = (await app.inject({ url: '/api/notes', headers: { cookie } })).json().find((x) => x.isMine && x.status === 'ready');
+  db.prepare("UPDATE notes SET preached_at = '2026-11-15' WHERE id = ?").run(n.id);
+  pushSent.length = 0;
+  await push.tick(new Date('2026-11-17T12:00:00Z')); // 6:00 en CDMX: aún no
+  assert.equal(pushSent.filter((m) => m.endpoint === sub.endpoint).length, 0);
+  await push.tick(new Date('2026-11-17T13:10:00Z')); // 7:10
+  const mine = pushSent.filter((m) => m.endpoint === sub.endpoint);
+  assert.equal(mine.length, 1);
+  assert.match(mine[0].title, /Día 2/);
+  assert.match(mine[0].url, /\?t=voz&dia=2$/);
+  await push.tick(new Date('2026-11-17T13:20:00Z'));
+  assert.equal(pushSent.filter((m) => m.endpoint === sub.endpoint).length, 1, 'una vez al día');
+  // Suscripción vencida (410) se borra.
+  const gone = createPush(db, { log: { warn() {} }, send: async () => { throw Object.assign(new Error('gone'), { statusCode: 410 }); } });
+  await gone.notifyUsers([(await app.inject({ url: '/api/me', headers: { cookie } })).json().user.id], { title: 't', body: 'b' });
+  assert.ok(!(await app.inject({ url: '/api/push', headers: { cookie } })).json().subscriptions.some((x) => x.endpoint === sub.endpoint));
 });
 
 test('la SPA responde en rutas del cliente', async () => {

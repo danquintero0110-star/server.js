@@ -31,7 +31,7 @@ export function sessionUser(db, token) {
   if (!token) return null;
   return (
     db
-      .prepare('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?')
+      .prepare('SELECT u.id, u.username, u.is_admin AS isAdmin FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?')
       .get(sha(token), Date.now()) || null
   );
 }
@@ -55,4 +55,11 @@ export function loginFailed(ip) {
 }
 export function loginSucceeded(ip) {
   attempts.delete(ip);
+}
+
+/** Contraseña aleatoria fácil de dictar (sin caracteres confusos). */
+export function randomPassword() {
+  const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const b = crypto.randomBytes(12);
+  return Array.from(b, (x) => abc[x % abc.length]).join('');
 }

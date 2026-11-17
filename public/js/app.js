@@ -3,6 +3,7 @@ import { h, icon, LOGO, toast, sheet, copyText, shareText, waLink, mmss, datePar
 import { voicePanel } from './selah-voice.js';
 import { focusPanel } from './focus.js';
 import { openStudio, phrasesFrom } from './studio.js';
+import { groupsView, accountSheet, adminSheet, notificationsSheet, shareSheet } from './social.js';
 import { WebRecorder, isSupported as canRecord, pendingRecording, discardPending } from './recorder.js';
 
 const app = document.getElementById('app');
@@ -13,6 +14,7 @@ let cleanup = null;
 const routes = [
   [/^\/entrar$/, loginView],
   [/^\/grabar$/, recordView],
+  [/^\/grupos$/, () => groupsView({ me: state.me, go })],
   [/^\/nota\/([\w-]+)$/, noteView],
   [/^\/$/, homeView],
 ];
@@ -137,6 +139,7 @@ function noteCard(n) {
         n.preacher ? h('span', {}, n.preacher) : null,
         n.durationSec ? h('span', { class: 'tnum' }, `${Math.round(n.durationSec / 60)} min`) : null,
         folder ? h('span', {}, `· ${folder.name}`) : null,
+        n.isMine === false ? h('span', { class: 'shared-tag' }, icon('users'), n.ownerName || 'Compartida') : null,
       ),
     ),
   );
@@ -185,6 +188,7 @@ async function homeView() {
       chip('', 'Todas'),
       ...state.folders.map((f) => chip(String(f.id), f.name, f.count)),
       chip('none', 'Sin carpeta'),
+      chip('shared', 'Compartidas conmigo'),
       h('button', { class: 'chip add', onclick: () => folderSheet(() => (loadFolders(), loadNotes())) }, icon('plus'), 'Carpeta'),
     );
   }
@@ -256,29 +260,33 @@ function emptyState() {
 }
 
 function menuSheet() {
-  sheet((close) => [
-    h('h3', {}, state.me?.username || 'Cuenta'),
-    h('p', { class: 'muted', style: { margin: 0 } }, `Biblia: ${state.bible?.name || 'Reina-Valera 1909'} (${state.bible?.license || 'dominio público'})`),
-    h(
-      'div',
-      { class: 'actions' },
+  sheet((close) => {
+    const act = (ic, t, d, fn, cls = '') =>
+      h('button', { class: `action ${cls}`, onclick: () => (close(), setTimeout(fn, 280)) }, h('span', { class: 'ic' }, icon(ic)), h('span', {}, h('b', {}, t), d ? h('small', { class: 'action-sub' }, d) : null), h('span'));
+    return [
+      h('h3', {}, state.me?.username || 'Cuenta'),
+      h('p', { class: 'muted', style: { margin: 0 } }, `Biblia: ${state.bible?.name || 'Reina-Valera 1909'} (${state.bible?.license || 'dominio público'})`),
       h(
-        'button',
-        {
-          class: 'action danger',
-          onclick: async () => {
+        'div',
+        { class: 'actions' },
+        act('users', 'Familia e iglesia', 'Grupos para compartir prédicas', () => go('/grupos')),
+        act('bell', 'Recordatorios', 'Tu devocional cada mañana', notificationsSheet),
+        act('key', 'Mi cuenta', 'Cambiar contraseña', () => accountSheet(state.me)),
+        state.me?.isAdmin ? act('users', 'Cuentas', 'Crear cuentas y restablecer contraseñas', adminSheet) : null,
+        act(
+          'logout',
+          'Cerrar sesión',
+          '',
+          async () => {
             await api.post('/api/logout');
-            close();
             state.me = null;
             go('/entrar', { replace: true });
           },
-        },
-        h('span', { class: 'ic' }, icon('logout')),
-        h('span', {}, h('b', {}, 'Cerrar sesión')),
-        h('span'),
+          'danger',
+        ),
       ),
-    ),
-  ]);
+    ];
+  });
 }
 
 function folderSheet(onDone, existing) {
@@ -617,7 +625,9 @@ async function noteView(id) {
         'div',
         { class: 'meta' },
         note.durationSec ? h('span', {}, `${Math.round(note.durationSec / 60)} min`) : null,
-        folder ? h('span', {}, folder.name) : null,
+        folder && note.isMine ? h('span', {}, folder.name) : null,
+        note.isMine === false ? h('span', { class: 'shared-tag' }, icon('users'), `Compartida por ${note.ownerName}`) : null,
+        note.isMine && note.shares?.length ? h('span', { class: 'shared-tag' }, icon('users'), note.shares.map((g) => g.name).join(', ')) : null,
         note.sourceType === 'youtube' ? h('a', { href: note.sourceUrl, target: '_blank', rel: 'noopener' }, 'Ver en YouTube') : null,
       ),
     );
@@ -1231,10 +1241,11 @@ async function noteView(id) {
         h(
           'div',
           { class: 'actions' },
-          act('edit', 'Editar datos', editSheet),
-          act('folder', 'Mover a carpeta', moveSheet),
-          note.status === 'ready' ? act('refresh', 'Volver a analizar', () => reprocess(false)) : null,
-          act(
+          note.isMine && note.status === 'ready' ? act('users', note.shares?.length ? `Compartida con ${note.shares.map((g) => g.name).join(', ')}` : 'Compartir con familia o iglesia', () => shareSheet(note)) : null,
+          note.isMine ? act('edit', 'Editar datos', editSheet) : null,
+          note.isMine ? act('folder', 'Mover a carpeta', moveSheet) : null,
+          note.isMine && note.status === 'ready' ? act('refresh', 'Volver a analizar', () => reprocess(false)) : null,
+          note.isMine ? act(
             'trash',
             'Eliminar nota',
             async () => {
@@ -1244,7 +1255,7 @@ async function noteView(id) {
               go('/', { replace: true });
             },
             'danger',
-          ),
+          ) : null,
         ),
       ];
     });
