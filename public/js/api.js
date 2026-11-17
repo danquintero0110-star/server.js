@@ -23,6 +23,7 @@ export const api = {
   get: (u) => req('GET', u),
   post: (u, b) => req('POST', u, b ?? {}),
   patch: (u, b) => req('PATCH', u, b),
+  put: (u, b) => req('PUT', u, b),
   del: (u) => req('DELETE', u),
 
   /** Subida con progreso (fetch no informa progreso de envío). */

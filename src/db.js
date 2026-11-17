@@ -69,8 +69,26 @@ export function openDb(file, { bibleFile } = {}) {
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   db.exec(SCHEMA);
+  migrate(db);
   if (bibleFile) loadBible(db, bibleFile);
   return db;
+}
+
+/** Cambios de esquema sobre bases existentes (idempotente). */
+function migrate(db) {
+  const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+  // Cada persona ve solo sus notas y carpetas.
+  if (!cols('notes').includes('user_id')) db.exec('ALTER TABLE notes ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE');
+  if (!cols('folders').includes('user_id')) db.exec('ALTER TABLE folders ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE');
+  // Marca personal (logo y nombre del negocio) para las imágenes.
+  if (!cols('users').includes('brand_json')) db.exec("ALTER TABLE users ADD COLUMN brand_json TEXT NOT NULL DEFAULT '{}'");
+  db.exec('CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, preached_at DESC)');
+  // Lo creado antes de haber varias cuentas pertenece a la primera cuenta.
+  const first = db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get();
+  if (first) {
+    db.prepare('UPDATE notes SET user_id = ? WHERE user_id IS NULL').run(first.id);
+    db.prepare('UPDATE folders SET user_id = ? WHERE user_id IS NULL').run(first.id);
+  }
 }
 
 function loadBible(db, bibleFile) {

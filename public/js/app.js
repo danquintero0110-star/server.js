@@ -1,6 +1,8 @@
 import { api } from './api.js';
 import { h, icon, LOGO, toast, sheet, copyText, shareText, waLink, mmss, dateParts, longDate, vibrate } from './ui.js';
 import { voicePanel } from './selah-voice.js';
+import { focusPanel } from './focus.js';
+import { openStudio, phrasesFrom } from './studio.js';
 import { WebRecorder, isSupported as canRecord, pendingRecording, discardPending } from './recorder.js';
 
 const app = document.getElementById('app');
@@ -549,6 +551,7 @@ function recordView() {
 const TABS = [
   ['resumen', 'Resumen'],
   ['voz', 'Selah habla'],
+  ['enfoques', 'Aplícalo'],
   ['versiculos', 'Versículos'],
   ['anuncios', 'Anuncios'],
   ['celula', 'Célula'],
@@ -733,7 +736,8 @@ async function noteView(id) {
     timeListeners.clear();
     const panel = h('section', { class: 'panel', role: 'tabpanel' });
     const voz = () => voicePanel(note, { me: state.me, pauseAudio: () => audio.pause() });
-    const builders = { resumen, voz, versiculos, anuncios, celula, devocional, redes, transcripcion, chat };
+    const enfoques = () => focusPanel(note, { me: state.me });
+    const builders = { resumen, voz, enfoques, versiculos, anuncios, celula, devocional, redes, transcripcion, chat };
     panel.append(...[builders[key]?.()].flat().filter(Boolean));
     return panel;
   }
@@ -1001,8 +1005,24 @@ async function noteView(id) {
     return [title('Devocional de 5 días'), track, dots];
   }
 
+  async function studio(text) {
+    let memoryText = '';
+    const mv = a().study?.memory_verse;
+    if (mv) memoryText = await api.get(`/api/bible?code=${mv.code}&chapter=${mv.chapter}&from=${mv.verse_start}&to=${mv.verse_end}`).then((p) => p.verses.map((x) => x.text).join(' ')).catch(() => '');
+    const phrases = phrasesFrom(note, { memoryText });
+    if (!phrases.length) return toast('No hay frases en esta nota', { error: true });
+    openStudio({ note, phrases, start: Math.max(0, phrases.findIndex((p) => p.text === text)), me: state.me });
+  }
+
   function redes() {
     return [
+      h(
+        'button',
+        { class: 'card st-hero', onclick: () => studio() },
+        h('span', { class: 'st-hero-art' }, h('i'), h('i'), h('i')),
+        h('span', {}, h('b', {}, 'Crear imágenes para compartir'), h('small', {}, 'Estados de WhatsApp, Instagram y Facebook, con el logo de tu negocio o ministerio')),
+        icon('chev'),
+      ),
       title('Para compartir'),
       h(
         'div',
@@ -1016,7 +1036,7 @@ async function noteView(id) {
               'div',
               { class: 'row' },
               h('span', {}, `${q.length} caracteres`),
-              h('span', { style: { display: 'flex', gap: '6px' } }, h('button', { class: 'btn small', onclick: () => copyText(q) }, icon('copy'), 'Copiar'), h('button', { class: 'icon-btn', 'aria-label': 'Compartir', onclick: () => shareText(q) }, icon('share'))),
+              h('span', { style: { display: 'flex', gap: '6px' } }, h('button', { class: 'btn small', onclick: () => studio(q) }, icon('spark'), 'Imagen'), h('button', { class: 'btn small', onclick: () => copyText(q) }, icon('copy'), 'Copiar'), h('button', { class: 'icon-btn', 'aria-label': 'Compartir', onclick: () => shareText(q) }, icon('share'))),
             ),
           ),
         ),

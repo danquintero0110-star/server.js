@@ -179,6 +179,45 @@ const CHAT_SYSTEM = `Eres Selah, un compañero de estudio. Respondes preguntas s
 - Texto plano, sin encabezados markdown.`;
 
 /** Chat sobre una nota. onText recibe fragmentos para streaming. */
+export const FOCUS_SCHEMA = obj({
+  title: { ...str, description: 'Título corto del enfoque, p. ej. "La comodidad en mi trabajo"' },
+  message: { ...str, description: '2 párrafos (120-200 palabras en total) separados por \\n\\n: cómo habla esta prédica a esta área' },
+  applications: { ...arr(str), description: '3 a 5 acciones concretas y realistas para esta área' },
+  verses: arr(obj({ ...verseRef, why: { ...str, description: 'Una frase: por qué aplica a esta área' } })),
+  challenge: { ...str, description: 'Un reto para esta semana, una sola frase' },
+  prayer: { ...str, description: 'Oración breve (40-70 palabras) para esta área' },
+  phrase: { ...str, description: 'Frase de impacto para compartir en redes, menos de 110 caracteres, sin hashtags ni comillas' },
+});
+
+const FOCUS_SYSTEM = `Eres un pastor que ayuda a llevar una prédica a un área concreta de la vida o del ministerio.
+Reglas:
+- Parte de lo que el predicador enseñó; no cambies su mensaje ni inventes citas suyas.
+- Habla directo a la persona (tú), con ejemplos realistas de esa área (trabajo, negocio, familia, intercesión, servicio, alabanza, etc.).
+- verses: 2 a 3 pasajes cortos y pertinentes (prefiere los citados en la prédica si aplican). Nunca inventes referencias.
+- Tono cálido y práctico. Sin markdown.`;
+
+export async function focusApplication({ segments, analysis, area, serviceDate }) {
+  const points = (analysis.main_points || []).map((p, i) => `${i + 1}. ${p.title} — ${p.detail}`).join('\n');
+  const stream = getClient().beta.messages.stream({
+    model: config.ai.model,
+    max_tokens: 16000,
+    betas: [FALLBACK_BETA],
+    fallbacks: 'default',
+    output_config: { effort: config.ai.chatEffort, format: { type: 'json_schema', schema: FOCUS_SCHEMA } },
+    system: FOCUS_SYSTEM,
+    messages: [
+      {
+        role: 'user',
+        content: `Área a enfocar: ${area}\nFecha del servicio: ${serviceDate}\nTítulo: ${analysis.title}\nIdea central: ${analysis.central_idea}\nPuntos:\n${points}\n\n<transcripcion>\n${formatTranscript(segments)}\n</transcripcion>`,
+      },
+    ],
+  });
+  const msg = await stream.finalMessage();
+  assertOk(msg);
+  const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  return { focus: JSON.parse(text), costUsd: usageCost(msg.usage) };
+}
+
 const VOICE_RULES = `
 MODO VOZ: tu respuesta se leerá en voz alta en una conversación.
 - 2 a 4 frases cortas y naturales (máximo 70 palabras), como alguien que platica con calidez. Nada de listas, títulos, asteriscos, emojis ni marcas de tiempo.

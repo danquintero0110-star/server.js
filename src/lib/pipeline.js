@@ -57,6 +57,45 @@ export function ensureStudy(db, id) {
   return run;
 }
 
+const focusInFlight = new Map();
+export const focusKey = (area) =>
+  String(area || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9ñ ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
+
+/** Aplica la prédica a un área (trabajo, intercesión…). Se guarda en analysis_json.focus[clave]. */
+export function ensureFocus(db, id, area) {
+  const key = focusKey(area);
+  const k = `${id}:${key}`;
+  if (focusInFlight.has(k)) return focusInFlight.get(k);
+  const run = (async () => {
+    const n = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+    if (!n?.analysis_json) throw new Error('La nota aún no está lista');
+    const analysis = JSON.parse(n.analysis_json);
+    if (analysis.focus?.[key]) return analysis.focus[key];
+    const { segments } = JSON.parse(n.transcript_json || '{"segments":[]}');
+    const { focus, costUsd } = await deps.ai.focusApplication({ segments, analysis, area: String(area).slice(0, 80), serviceDate: n.preached_at });
+    focus.area = String(area).trim().slice(0, 80);
+    focus.verses = resolveVerses(db, focus.verses || []).filter((v) => v.found);
+    focus.created_at = new Date().toISOString();
+    const cur = db.prepare('SELECT analysis_json FROM notes WHERE id = ?').get(id);
+    if (!cur?.analysis_json) throw new Error('La nota cambió mientras se preparaba el enfoque');
+    const updated = JSON.parse(cur.analysis_json);
+    updated.focus = { ...(updated.focus || {}), [key]: focus };
+    db.prepare(
+      "UPDATE notes SET analysis_json = ?, cost_json = json_set(cost_json, '$.focus', round(coalesce(json_extract(cost_json, '$.focus'), 0) + ?, 4)) WHERE id = ?",
+    ).run(JSON.stringify(updated), costUsd, id);
+    return focus;
+  })().finally(() => focusInFlight.delete(k));
+  focusInFlight.set(k, run);
+  return run;
+}
+
 export function createQueue(db, { log = console } = {}) {
   const pending = [];
   let running = false;

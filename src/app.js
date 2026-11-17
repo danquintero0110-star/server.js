@@ -13,7 +13,7 @@ import { BIBLE_VERSION, getPassage, parseRef } from './lib/bible.js';
 import * as exp from './lib/exporters.js';
 import { youtubeId } from './lib/media.js';
 import { chatAboutNote } from './providers/ai.js';
-import { deps as pipelineDeps, ensureStudy } from './lib/pipeline.js';
+import { deps as pipelineDeps, ensureFocus, ensureStudy, focusKey } from './lib/pipeline.js';
 import { availableProvider } from './providers/transcribe.js';
 
 const EXT = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/aac': 'aac', 'audio/flac': 'flac' };
@@ -66,15 +66,17 @@ export function buildApp({ db, queue, logger = false }) {
     },
   });
 
-  const getNote = (id) => db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+  // Siempre con el dueño: una persona nunca ve ni toca notas de otra.
+  const getNote = (id, uid) => db.prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
+  const ownFolder = (fid, uid) => (fid ? db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(fid, uid)?.id || null : null);
   function createNote(req, n) {
     db.prepare(
-      `INSERT INTO notes (id, title, preacher, preached_at, folder_id, source_type, source_url, audio_file, audio_mime, status)
-       VALUES (@id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, 'queued')`,
-    ).run(n);
+      `INSERT INTO notes (id, user_id, title, preacher, preached_at, folder_id, source_type, source_url, audio_file, audio_mime, status)
+       VALUES (@id, @user_id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, 'queued')`,
+    ).run({ ...n, user_id: req.user.id, folder_id: ownFolder(n.folder_id, req.user.id) });
     indexNote(db, n.id);
     Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
-    return serializeNote(getNote(n.id), { full: true });
+    return serializeNote(getNote(n.id, req.user.id), { full: true });
   }
 
   // --- Autenticación -------------------------------------------------------
@@ -111,21 +113,92 @@ export function buildApp({ db, queue, logger = false }) {
     return { ok: true };
   });
 
-  app.get('/api/me', async (req) => ({ user: req.user, bible: BIBLE_VERSION }));
+  const brandOf = (uid) => {
+    try {
+      return JSON.parse(db.prepare('SELECT brand_json FROM users WHERE id = ?').get(uid)?.brand_json || '{}');
+    } catch {
+      return {};
+    }
+  };
+  const saveBrand = (uid, b) => db.prepare('UPDATE users SET brand_json = ? WHERE id = ?').run(JSON.stringify(b), uid);
+  const brandDir = () => path.join(config.dataDir, 'brand');
+  const LOGO_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+
+  app.get('/api/me', async (req) => ({ user: req.user, bible: BIBLE_VERSION, brand: brandOf(req.user.id) }));
+
+  // --- Mi marca: nombre, usuario de redes y logo para las imágenes -------------
+  app.put('/api/me/brand', async (req) => {
+    const b = brandOf(req.user.id);
+    const body = req.body || {};
+    if (body.name !== undefined) b.name = String(body.name).trim().slice(0, 60);
+    if (body.handle !== undefined) b.handle = String(body.handle).trim().slice(0, 40);
+    if (body.showLogo !== undefined) b.showLogo = Boolean(body.showLogo);
+    saveBrand(req.user.id, b);
+    return b;
+  });
+  app.post('/api/me/logo', async (req, reply) => {
+    const mime = String(req.headers['x-image-mime'] || '').split(';')[0];
+    const ext = LOGO_TYPES[mime];
+    if (!ext) return reply.code(400).send({ error: 'El logo debe ser PNG, JPG o WEBP' });
+    const stream = req.body;
+    if (!stream || typeof stream.pipe !== 'function') return reply.code(400).send({ error: 'Falta la imagen' });
+    fs.mkdirSync(brandDir(), { recursive: true });
+    const file = path.join(brandDir(), `${req.user.id}.${ext}`);
+    const tmp = `${file}.tmp`;
+    try {
+      let size = 0;
+      await pump(
+        stream,
+        async function* (src) {
+          for await (const c of src) {
+            size += c.length;
+            if (size > 2 * 1048576) throw Object.assign(new Error('El logo debe pesar menos de 2 MB'), { statusCode: 413 });
+            yield c;
+          }
+        },
+        fs.createWriteStream(tmp),
+      );
+      for (const e of Object.values(LOGO_TYPES)) fs.rmSync(path.join(brandDir(), `${req.user.id}.${e}`), { force: true });
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      fs.rmSync(tmp, { force: true });
+      if (e.statusCode === 413) return reply.code(413).send({ error: e.message });
+      throw e;
+    }
+    const b = brandOf(req.user.id);
+    b.logo = `${ext}:${Date.now()}`;
+    if (b.showLogo === undefined) b.showLogo = true;
+    saveBrand(req.user.id, b);
+    return b;
+  });
+  app.get('/api/me/logo', async (req, reply) => {
+    const b = brandOf(req.user.id);
+    const ext = String(b.logo || '').split(':')[0];
+    if (!Object.values(LOGO_TYPES).includes(ext) || !fs.existsSync(path.join(brandDir(), `${req.user.id}.${ext}`))) return reply.code(404).send({ error: 'Sin logo' });
+    reply.header('Cache-Control', 'private, max-age=600');
+    return reply.sendFile(`${req.user.id}.${ext}`, brandDir(), { cacheControl: false });
+  });
+  app.delete('/api/me/logo', async (req) => {
+    for (const e of Object.values(LOGO_TYPES)) fs.rmSync(path.join(brandDir(), `${req.user.id}.${e}`), { force: true });
+    const b = brandOf(req.user.id);
+    delete b.logo;
+    saveBrand(req.user.id, b);
+    return b;
+  });
 
   // --- Carpetas ------------------------------------------------------------
-  app.get('/api/folders', async () =>
-    db.prepare('SELECT f.*, (SELECT count(*) FROM notes n WHERE n.folder_id = f.id) AS count FROM folders f ORDER BY name').all(),
+  app.get('/api/folders', async (req) =>
+    db.prepare('SELECT f.*, (SELECT count(*) FROM notes n WHERE n.folder_id = f.id) AS count FROM folders f WHERE f.user_id = ? ORDER BY name').all(req.user.id),
   );
   app.post('/api/folders', async (req, reply) => {
     const name = String(req.body?.name || '').trim().slice(0, 60);
     if (!name) return reply.code(400).send({ error: 'Escribe un nombre' });
     const color = String(req.body?.color || 'amber').slice(0, 20);
-    const { lastInsertRowid } = db.prepare('INSERT INTO folders (name, color) VALUES (?, ?)').run(name, color);
+    const { lastInsertRowid } = db.prepare('INSERT INTO folders (name, color, user_id) VALUES (?, ?, ?)').run(name, color, req.user.id);
     return db.prepare('SELECT * FROM folders WHERE id = ?').get(lastInsertRowid);
   });
   app.patch('/api/folders/:id', async (req, reply) => {
-    const f = db.prepare('SELECT * FROM folders WHERE id = ?').get(req.params.id);
+    const f = db.prepare('SELECT * FROM folders WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
     if (!f) return reply.code(404).send({ error: 'No existe' });
     db.prepare('UPDATE folders SET name = ?, color = ? WHERE id = ?').run(
       String(req.body?.name ?? f.name).trim().slice(0, 60) || f.name,
@@ -135,15 +208,15 @@ export function buildApp({ db, queue, logger = false }) {
     return db.prepare('SELECT * FROM folders WHERE id = ?').get(f.id);
   });
   app.delete('/api/folders/:id', async (req) => {
-    db.prepare('DELETE FROM folders WHERE id = ?').run(req.params.id);
+    db.prepare('DELETE FROM folders WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
     return { ok: true };
   });
 
   // --- Notas ---------------------------------------------------------------
   app.get('/api/notes', async (req) => {
     const { q = '', folder = '' } = req.query;
-    const where = [];
-    const params = {};
+    const where = ['n.user_id = @uid'];
+    const params = { uid: req.user.id };
     let sql = 'SELECT n.* FROM notes n';
     if (q.trim()) {
       const terms = q
@@ -163,7 +236,7 @@ export function buildApp({ db, queue, logger = false }) {
       where.push('n.folder_id = @folder');
       params.folder = Number(folder);
     }
-    if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
+    sql += ` WHERE ${where.join(' AND ')}`;
     sql += params.terms ? ' ORDER BY rank LIMIT 100' : ' ORDER BY n.preached_at DESC, n.created_at DESC LIMIT 300';
     return db
       .prepare(sql)
@@ -229,10 +302,11 @@ export function buildApp({ db, queue, logger = false }) {
   const upDir = () => path.join(config.dataDir, 'uploads');
   const upMeta = (uid) => path.join(upDir(), `${uid}.json`);
   const upPart = (uid) => path.join(upDir(), `${uid}.part`);
-  const readUp = (uid) => {
+  const readUp = (uid, userId) => {
     if (!/^[0-9a-f-]{36}$/.test(uid)) return null;
     try {
-      return JSON.parse(fs.readFileSync(upMeta(uid), 'utf8'));
+      const m = JSON.parse(fs.readFileSync(upMeta(uid), 'utf8'));
+      return m.userId === userId ? m : null;
     } catch {
       return null;
     }
@@ -275,6 +349,7 @@ export function buildApp({ db, queue, logger = false }) {
     const uid = crypto.randomUUID();
     const ext = EXT[mime] || path.extname(String(b.name || '')).slice(1).replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'bin';
     const meta = {
+      userId: req.user.id,
       size,
       mime: mime || 'application/octet-stream',
       ext,
@@ -290,7 +365,7 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   app.get('/api/uploads/:id', async (req, reply) => {
-    const meta = readUp(req.params.id);
+    const meta = readUp(req.params.id, req.user.id);
     if (!meta) return reply.code(404).send({ error: 'La subida ya no existe' });
     return { id: req.params.id, offset: upOffset(req.params.id), size: meta.size };
   });
@@ -299,7 +374,7 @@ export function buildApp({ db, queue, logger = false }) {
   const busy = new Set();
   app.put('/api/uploads/:id', async (req, reply) => {
     const uid = req.params.id;
-    const meta = readUp(uid);
+    const meta = readUp(uid, req.user.id);
     if (!meta) return reply.code(404).send({ error: 'La subida ya no existe' });
     if (busy.has(uid)) return reply.code(409).send({ error: 'Parte en curso', offset: upOffset(uid) });
     const offset = Number(req.query.offset);
@@ -337,7 +412,7 @@ export function buildApp({ db, queue, logger = false }) {
 
   app.post('/api/uploads/:id/finish', async (req, reply) => {
     const uid = req.params.id;
-    const meta = readUp(uid);
+    const meta = readUp(uid, req.user.id);
     if (!meta) return reply.code(404).send({ error: 'La subida ya no existe' });
     if (busy.has(uid)) return reply.code(409).send({ error: 'Parte en curso' });
     const have = upOffset(uid);
@@ -347,12 +422,12 @@ export function buildApp({ db, queue, logger = false }) {
     fs.mkdirSync(audioDir(), { recursive: true });
     fs.renameSync(upPart(uid), path.join(audioDir(), audioFile));
     fs.rmSync(upMeta(uid), { force: true });
-    const { size, mime, ext, sourceType, ...fields } = meta;
+    const { size, mime, ext, sourceType, userId, ...fields } = meta;
     return reply.code(201).send(createNote(req, { id, ...fields, sourceType, sourceUrl: '', audioFile, audioMime: mime }));
   });
 
   app.delete('/api/uploads/:id', async (req) => {
-    if (readUp(req.params.id)) {
+    if (readUp(req.params.id, req.user.id)) {
       fs.rmSync(upPart(req.params.id), { force: true });
       fs.rmSync(upMeta(req.params.id), { force: true });
     }
@@ -360,53 +435,55 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   app.get('/api/notes/:id', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
     return serializeNote(n, { full: true });
   });
 
   app.patch('/api/notes/:id', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
     const b = req.body || {};
     const upd = {
       title: b.title !== undefined ? String(b.title).slice(0, 200) : n.title,
       preacher: b.preacher !== undefined ? String(b.preacher).slice(0, 200) : n.preacher,
       preached_at: /^\d{4}-\d{2}-\d{2}$/.test(b.preachedAt || '') ? b.preachedAt : n.preached_at,
-      folder_id: b.folderId !== undefined ? Number(b.folderId) || null : n.folder_id,
+      folder_id: b.folderId !== undefined ? ownFolder(Number(b.folderId) || null, req.user.id) : n.folder_id,
     };
     db.prepare(
       "UPDATE notes SET title = @title, preacher = @preacher, preached_at = @preached_at, folder_id = @folder_id, updated_at = datetime('now') WHERE id = @id",
     ).run({ ...upd, id: n.id });
     indexNote(db, n.id);
-    return serializeNote(getNote(n.id), { full: true });
+    return serializeNote(getNote(n.id, req.user.id), { full: true });
   });
 
   app.delete('/api/notes/:id', async (req) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (n) {
       for (const f of fs.existsSync(audioDir()) ? fs.readdirSync(audioDir()) : []) {
         if (f.startsWith(`${n.id}.`) || f.startsWith(`${n.id}-`)) fs.rmSync(path.join(audioDir(), f), { force: true });
       }
     }
-    db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
-    db.prepare('DELETE FROM notes_fts WHERE note_id = ?').run(req.params.id);
+    if (n) {
+      db.prepare('DELETE FROM notes WHERE id = ?').run(n.id);
+      db.prepare('DELETE FROM notes_fts WHERE note_id = ?').run(n.id);
+    }
     return { ok: true };
   });
 
   app.post('/api/notes/:id/reprocess', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
     const fromScratch = req.body?.transcribe === true;
     db.prepare(
       `UPDATE notes SET status = 'queued', error = '', analysis_json = ''${fromScratch ? ", transcript_json = ''" : ''} WHERE id = ?`,
     ).run(n.id);
     Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
-    return serializeNote(getNote(n.id), { full: true });
+    return serializeNote(getNote(n.id, req.user.id), { full: true });
   });
 
   app.get('/api/notes/:id/audio', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n?.audio_file) return reply.code(404).send({ error: 'Sin audio' });
     reply.header('Content-Type', n.audio_mime || 'audio/mp4');
     return reply.sendFile(n.audio_file, audioDir(), { cacheControl: false, contentType: false });
@@ -421,7 +498,7 @@ export function buildApp({ db, queue, logger = false }) {
   };
 
   app.get('/api/notes/:id/export.pdf', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
     let a = JSON.parse(n.analysis_json);
     if (!a.study) {
@@ -439,7 +516,7 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   app.get('/api/notes/:id/whatsapp', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
     const a = JSON.parse(n.analysis_json);
     return { summary: exp.summaryWhatsapp(n, a), announcements: exp.announcementsWhatsapp(n, a.announcements) };
@@ -456,16 +533,17 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   // --- Chat sobre una nota -------------------------------------------------
-  app.get('/api/notes/:id/chat', async (req) =>
-    db.prepare('SELECT id, role, content, created_at FROM chat_messages WHERE note_id = ? ORDER BY id').all(req.params.id),
-  );
+  app.get('/api/notes/:id/chat', async (req, reply) => {
+    if (!getNote(req.params.id, req.user.id)) return reply.code(404).send({ error: 'Nota no encontrada' });
+    return db.prepare('SELECT id, role, content, created_at FROM chat_messages WHERE note_id = ? ORDER BY id').all(req.params.id);
+  });
   app.delete('/api/notes/:id/chat', async (req) => {
-    db.prepare('DELETE FROM chat_messages WHERE note_id = ?').run(req.params.id);
+    if (getNote(req.params.id, req.user.id)) db.prepare('DELETE FROM chat_messages WHERE note_id = ?').run(req.params.id);
     return { ok: true };
   });
 
   app.post('/api/notes/:id/chat', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n?.transcript_json) return reply.code(404).send({ error: 'La nota aún no tiene transcripción' });
     const question = String(req.body?.question || '').trim().slice(0, 2000);
     if (!question) return reply.code(400).send({ error: 'Escribe una pregunta' });
@@ -503,10 +581,33 @@ export function buildApp({ db, queue, logger = false }) {
     res.end();
   });
 
+  // --- Enfoques: la prédica aplicada a un área ---------------------------------
+  app.post('/api/notes/:id/focus', async (req, reply) => {
+    const n = getNote(req.params.id, req.user.id);
+    if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
+    const area = String(req.body?.area || '').trim();
+    if (!focusKey(area)) return reply.code(400).send({ error: 'Escribe un área, por ejemplo "mi trabajo"' });
+    if (area.length > 80) return reply.code(400).send({ error: 'Escribe un área más corta' });
+    try {
+      return { key: focusKey(area), focus: await ensureFocus(db, n.id, area) };
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(502).send({ error: 'No pude preparar ese enfoque. Intenta de nuevo.' });
+    }
+  });
+  app.delete('/api/notes/:id/focus/:key', async (req, reply) => {
+    const n = getNote(req.params.id, req.user.id);
+    if (!n?.analysis_json) return reply.code(404).send({ error: 'Nota no encontrada' });
+    const a = JSON.parse(n.analysis_json);
+    if (a.focus) delete a.focus[req.params.key];
+    db.prepare('UPDATE notes SET analysis_json = ? WHERE id = ?').run(JSON.stringify(a), n.id);
+    return { ok: true };
+  });
+
   // --- Voz: escuchar lo que dice la persona (clips cortos) ---------------------
   const MAX_CLIP = 6 * 1048576;
   app.post('/api/notes/:id/listen', async (req, reply) => {
-    const n = getNote(req.params.id);
+    const n = getNote(req.params.id, req.user.id);
     if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
     const stream = req.body;
     if (!stream || typeof stream.pipe !== 'function') return reply.code(400).send({ error: 'Envía el audio como application/octet-stream' });

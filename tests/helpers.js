@@ -71,7 +71,20 @@ export const SAMPLE_STUDY = {
   memory_verse: { book: 'Juan', chapter: 3, verse_start: 16, verse_end: 16 },
 };
 
-export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY, chatText = 'Según la prédica [2:30], Pedro se hundió al mirar el viento.' } = {}) {
+export const SAMPLE_FOCUS = {
+  title: 'La fe en mi trabajo',
+  message: 'Primer párrafo.\n\nSegundo párrafo.',
+  applications: ['Ora antes de tu jornada.', 'Sirve con excelencia.', 'Anima a un compañero.'],
+  verses: [
+    { book: 'Colosenses', chapter: 3, verse_start: 23, verse_end: 23, why: 'Trabaja como para el Señor.' },
+    { book: 'Juan', chapter: 99, verse_start: 1, verse_end: 1, why: 'No existe.' },
+  ],
+  challenge: 'Esta semana, ora por tu jefe.',
+  prayer: 'Señor, bendice mi trabajo.',
+  phrase: 'Tu trabajo también es altar.',
+};
+
+export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY, focus = SAMPLE_FOCUS, chatText = 'Según la prédica [2:30], Pedro se hundió al mirar el viento.' } = {}) {
   const calls = [];
   return {
     calls,
@@ -81,7 +94,8 @@ export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY
           calls.push(params);
           const isAnalysis = Boolean(params.output_config?.format);
           const isStudy = Boolean(params.output_config?.format?.schema?.properties?.introduction);
-          const text = isStudy ? JSON.stringify(study) : isAnalysis ? JSON.stringify(analysis) : chatText;
+          const isFocus = Boolean(params.output_config?.format?.schema?.properties?.phrase);
+          const text = isFocus ? JSON.stringify(focus) : isStudy ? JSON.stringify(study) : isAnalysis ? JSON.stringify(analysis) : chatText;
           const listeners = {};
           return {
             on(ev, fn) {

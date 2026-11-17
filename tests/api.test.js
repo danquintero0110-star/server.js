@@ -259,6 +259,43 @@ test('voz: escuchar un clip y responder en modo voz y devocional', async () => {
   assert.doesNotMatch(sys, /MODO VOZ/);
 });
 
+test('enfoques: la prédica aplicada a un área, guardada y sin pagar dos veces', async () => {
+  const bad = await app.inject({ method: 'POST', url: `/api/notes/${noteId}/focus`, headers: { cookie }, payload: { area: '  ' } });
+  assert.equal(bad.statusCode, 400);
+  const r = await app.inject({ method: 'POST', url: `/api/notes/${noteId}/focus`, headers: { cookie }, payload: { area: 'Mi Trabajo' } });
+  assert.equal(r.statusCode, 200, r.body);
+  const { key, focus } = r.json();
+  assert.equal(key, 'mi trabajo');
+  assert.equal(focus.title, 'La fe en mi trabajo');
+  assert.deepEqual(focus.verses.map((v) => v.reference), ['Colosenses 3:23']);
+  const calls = anthropic.calls.length;
+  const again = await app.inject({ method: 'POST', url: `/api/notes/${noteId}/focus`, headers: { cookie }, payload: { area: 'mi trabajo' } });
+  assert.equal(again.json().focus.title, 'La fe en mi trabajo');
+  assert.equal(anthropic.calls.length, calls, 'segunda vez sale de lo guardado');
+  const n = (await app.inject({ url: `/api/notes/${noteId}`, headers: { cookie } })).json();
+  assert.ok(n.analysis.focus['mi trabajo']);
+  assert.ok(n.cost.focus > 0);
+  await app.inject({ method: 'DELETE', url: `/api/notes/${noteId}/focus/mi%20trabajo`, headers: { cookie } });
+  assert.equal((await app.inject({ url: `/api/notes/${noteId}`, headers: { cookie } })).json().analysis.focus['mi trabajo'], undefined);
+});
+
+test('mi marca: nombre, redes y logo', async () => {
+  const b = (await app.inject({ method: 'PUT', url: '/api/me/brand', headers: { cookie }, payload: { name: 'Taller Quintero', handle: '@taller' } })).json();
+  assert.equal(b.name, 'Taller Quintero');
+  assert.equal((await app.inject({ url: '/api/me/logo', headers: { cookie } })).statusCode, 404);
+  const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex');
+  const up = await app.inject({ method: 'POST', url: '/api/me/logo', headers: { cookie, 'content-type': 'application/octet-stream', 'x-image-mime': 'image/png' }, body: png });
+  assert.equal(up.statusCode, 200, up.body);
+  assert.match(up.json().logo, /^png:/);
+  const got = await app.inject({ url: '/api/me/logo', headers: { cookie } });
+  assert.equal(got.statusCode, 200);
+  assert.equal(got.rawPayload.length, png.length);
+  assert.equal((await app.inject({ url: '/api/me', headers: { cookie } })).json().brand.name, 'Taller Quintero');
+  assert.equal((await app.inject({ method: 'POST', url: '/api/me/logo', headers: { cookie, 'content-type': 'application/octet-stream', 'x-image-mime': 'image/gif' }, body: png })).statusCode, 400);
+  await app.inject({ method: 'DELETE', url: '/api/me/logo', headers: { cookie } });
+  assert.equal((await app.inject({ url: '/api/me/logo', headers: { cookie } })).statusCode, 404);
+});
+
 test('nota desde YouTube', async () => {
   const bad = await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie }, payload: { youtubeUrl: 'https://vimeo.com/1' } });
   assert.equal(bad.statusCode, 400);
@@ -293,6 +330,32 @@ test('borrar nota elimina audio y búsqueda', async () => {
   const left = (await app.inject({ url: '/api/notes?q=destino', headers: { cookie } })).json();
   assert.ok(!left.some((x) => x.id === noteId));
   assert.ok(!fs.existsSync(path.join(dataDir, 'audio', `${noteId}.src.webm`)));
+});
+
+test('cuentas separadas: nadie ve ni toca notas, carpetas ni subidas de otro', async () => {
+  db.prepare('INSERT INTO users (username, pass_hash) VALUES (?, ?)').run('zabdi', hashPassword('otra-clave'));
+  const login = await app.inject({ method: 'POST', url: '/api/login', payload: { username: 'zabdi', password: 'otra-clave' } });
+  const other = login.headers['set-cookie'].split(';')[0];
+  const mine = (await app.inject({ url: '/api/notes', headers: { cookie } })).json();
+  assert.ok(mine.length > 0);
+  assert.deepEqual((await app.inject({ url: '/api/notes', headers: { cookie: other } })).json(), []);
+  assert.deepEqual((await app.inject({ url: '/api/notes?q=tormenta', headers: { cookie: other } })).json(), []);
+  assert.deepEqual((await app.inject({ url: '/api/folders', headers: { cookie: other } })).json(), []);
+  const id = mine[0].id;
+  for (const [method, url] of [['GET', `/api/notes/${id}`], ['GET', `/api/notes/${id}/audio`], ['GET', `/api/notes/${id}/export.pdf`], ['GET', `/api/notes/${id}/whatsapp`], ['GET', `/api/notes/${id}/chat`], ['PATCH', `/api/notes/${id}`], ['POST', `/api/notes/${id}/reprocess`]]) {
+    const r = await app.inject({ method, url, headers: { cookie: other }, payload: method === 'GET' ? undefined : {} });
+    assert.equal(r.statusCode, 404, `${method} ${url} → ${r.statusCode}`);
+  }
+  assert.equal((await app.inject({ method: 'POST', url: `/api/notes/${id}/focus`, headers: { cookie: other }, payload: { area: 'trabajo' } })).statusCode, 404);
+  assert.equal((await app.inject({ method: 'POST', url: `/api/notes/${id}/listen`, headers: { cookie: other, 'content-type': 'application/octet-stream' }, body: Buffer.alloc(2000) })).statusCode, 404);
+  assert.equal((await app.inject({ url: '/api/me', headers: { cookie: other } })).json().brand.name, undefined, 'la marca es de cada quien');
+  await app.inject({ method: 'DELETE', url: `/api/notes/${id}`, headers: { cookie: other } });
+  assert.equal((await app.inject({ url: `/api/notes/${id}`, headers: { cookie } })).statusCode, 200, 'la nota sigue existiendo');
+  // Carpeta ajena no se puede asignar.
+  const f = (await app.inject({ method: 'POST', url: '/api/folders', headers: { cookie }, payload: { name: 'Mía' } })).json();
+  const st = (await app.inject({ method: 'POST', url: '/api/uploads', headers: { cookie: other }, payload: { size: 10, mime: 'audio/webm', folderId: f.id } })).json();
+  assert.equal((await app.inject({ url: `/api/uploads/${st.id}`, headers: { cookie } })).statusCode, 404, 'subida ajena invisible');
+  await app.inject({ method: 'DELETE', url: `/api/uploads/${st.id}`, headers: { cookie: other } });
 });
 
 test('la SPA responde en rutas del cliente', async () => {
