@@ -567,7 +567,10 @@ function voicePicker() {
   };
   api
     .get('/api/tts/voices')
-    .then((r) => (r.available ? render(r.voices) : render([])))
+    .then((r) => {
+      V.setDefaultVoice(r.default);
+      render(r.available ? r.voices : []);
+    })
     .catch(() => render([]));
   return h('details', { class: 'card v-voice-box' }, h('summary', {}, icon('headphones'), 'Voz de Selah', h('span', { class: 'v-voice-cur' }, '')), box);
 }

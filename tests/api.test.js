@@ -329,6 +329,45 @@ test('voz humana: lista de voces, audio con caché y límites', async () => {
   }
 });
 
+test('voz de locutor (ElevenLabs) con respaldo de Deepgram si falla', async () => {
+  const realFetch = globalThis.fetch;
+  process.env.ELEVENLABS_API_KEY = 'test-eleven';
+  let elevenOk = true;
+  const seen = [];
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.startsWith('https://api.elevenlabs.io/')) {
+      seen.push('eleven');
+      return elevenOk ? new Response(Buffer.from('ELEVEN-mp3'), { status: 200 }) : new Response('{"detail":"quota_exceeded"}', { status: 401 });
+    }
+    if (u.startsWith('https://api.deepgram.com/v1/speak')) {
+      seen.push('deepgram');
+      return new Response(Buffer.from('DG-mp3'), { status: 200 });
+    }
+    return realFetch(url, opts);
+  };
+  try {
+    const voices = (await app.inject({ url: '/api/tts/voices', headers: { cookie } })).json();
+    assert.equal(voices.default, 'zabra');
+    assert.ok(voices.voices.find((v) => v.id === 'zabra').premium);
+    const r = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'La paz de Dios sea contigo.' } });
+    assert.equal(r.body, 'ELEVEN-mp3');
+    elevenOk = false;
+    const fb = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'faraon' } });
+    assert.equal(fb.statusCode, 200);
+    assert.equal(fb.body, 'DG-mp3', 'sin créditos: suena Deepgram');
+    elevenOk = true;
+    const again = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'faraon' } });
+    assert.equal(again.body, 'ELEVEN-mp3', 'el respaldo no se guardó en caché');
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.ELEVENLABS_API_KEY;
+  }
+  const v2 = (await app.inject({ url: '/api/tts/voices', headers: { cookie } })).json();
+  assert.equal(v2.default, 'valerio');
+  assert.ok(!v2.voices.some((v) => v.id === 'zabra'), 'sin llave no se ofrecen voces de ElevenLabs');
+});
+
 test('nota desde YouTube', async () => {
   const bad = await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie }, payload: { youtubeUrl: 'https://vimeo.com/1' } });
   assert.equal(bad.statusCode, 400);

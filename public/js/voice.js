@@ -9,8 +9,11 @@ export const canSpeak = () => typeof Audio !== 'undefined' || Boolean(synth);
 export const canListen = () => Boolean(typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined');
 
 // ---- Preferencia de voz ('device' = la del teléfono)
-const VOICE_KEY = 'selah-voice-id';
-export const getVoiceId = () => store.getItem(VOICE_KEY) || 'valerio';
+const VOICE_KEY = 'selah-voice-v2';
+let serverDefault = '';
+/** La voz predeterminada la decide el servidor (la de locutor si está configurada). */
+export const setDefaultVoice = (id) => (serverDefault = id || '');
+export const getVoiceId = () => store.getItem(VOICE_KEY) || serverDefault || '';
 export const setVoiceId = (id) => store.setItem(VOICE_KEY, id);
 let noteId = '';
 /** Para registrar el costo de la voz en la nota que se está escuchando. */

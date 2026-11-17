@@ -626,13 +626,13 @@ export function buildApp({ db, queue, logger = false }) {
   };
   app.get('/api/tts/voices', async () => ({
     available: tts.ttsAvailable(),
-    default: tts.DEFAULT_VOICE,
-    voices: Object.entries(tts.VOICES).map(([id, v]) => ({ id, label: v.label, desc: v.desc, gender: v.gender })),
+    default: tts.defaultVoice(),
+    voices: tts.availableVoices().map(([id, v]) => ({ id, label: v.label, desc: v.desc, gender: v.gender, premium: v.provider === 'eleven' })),
   }));
   app.post('/api/tts', async (req, reply) => {
     if (!tts.ttsAvailable()) return reply.code(503).send({ error: 'Voz no disponible' });
     const text = String(req.body?.text || '').replace(/\s+/g, ' ').trim();
-    const voice = tts.VOICES[req.body?.voice] ? req.body.voice : tts.DEFAULT_VOICE;
+    const voice = tts.resolveVoice(req.body?.voice);
     if (!text) return reply.code(400).send({ error: 'Falta el texto' });
     if (text.length > 1800) return reply.code(400).send({ error: 'Texto demasiado largo' });
     const hash = crypto.createHash('sha256').update(`${voice}\n${text}`).digest('hex').slice(0, 40);
@@ -654,6 +654,11 @@ export function buildApp({ db, queue, logger = false }) {
     } catch (e) {
       req.log.warn(e.message);
       return reply.code(502).send({ error: 'La voz no respondió' });
+    }
+    if (out.fallback) {
+      // No se guarda en caché: cuando vuelva ElevenLabs debe sonar la voz elegida.
+      req.log.warn(`ElevenLabs falló, se usó Deepgram: ${tts.lastElevenError}`);
+      return reply.send(out.audio);
     }
     fs.mkdirSync(ttsDir(), { recursive: true });
     fs.writeFileSync(`${file}.tmp`, out.audio);
