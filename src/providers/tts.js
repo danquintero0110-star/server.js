@@ -4,11 +4,11 @@
 import { config } from '../config.js';
 
 export const VOICES = {
-  // ElevenLabs: narradores en español con voz grave, pausada y que transmite paz.
-  zabra: { provider: 'eleven', id: 'G6LT3kjUUW86fQaWfBaj', label: 'Zabra', desc: 'Locutor grave y sereno · México', gender: 'm' },
-  faraon: { provider: 'eleven', id: 'W1hAcdh0RNsPYUA7fkJh', label: 'El Faraón', desc: 'Grave, cálida y cercana · Colombia', gender: 'm' },
-  damian: { provider: 'eleven', id: 'BPwS5yO6aXvwg8auqNwS', label: 'Damián', desc: 'Narrador profundo de documental · neutro', gender: 'm' },
-  alex: { provider: 'eleven', id: 'HJZsH9Tm3FtUeJzIjWVE', label: 'Alex', desc: 'Pausada y sobria · neutro', gender: 'm' },
+  // ElevenLabs: voz diseñada en la cuenta del dueño (funciona en el plan gratis).
+  selah: { provider: 'eleven', id: process.env.ELEVENLABS_VOICE_ID || 'BDadAH8WNdVe8MyC96Bg', label: 'Selah', desc: 'Locutor grave, cálido y sereno', gender: 'm' },
+  // Voces de la biblioteca de ElevenLabs: requieren plan de pago (ELEVENLABS_LIBRARY=1 para ofrecerlas).
+  faraon: { provider: 'eleven', library: true, id: 'W1hAcdh0RNsPYUA7fkJh', label: 'El Faraón', desc: 'Grave, cálida y cercana · Colombia', gender: 'm' },
+  zabra: { provider: 'eleven', library: true, id: 'G6LT3kjUUW86fQaWfBaj', label: 'Zabra', desc: 'Locutor grave y sereno · México', gender: 'm' },
   // Deepgram Aura-2.
   valerio: { provider: 'deepgram', id: 'aura-2-valerio-es', label: 'Valerio', desc: 'Grave y natural · México', gender: 'm' },
   javier: { provider: 'deepgram', id: 'aura-2-javier-es', label: 'Javier', desc: 'Tranquila y amigable · Latinoamérica', gender: 'm' },
@@ -18,22 +18,23 @@ export const VOICES = {
 
 const hasEleven = () => Boolean(process.env.ELEVENLABS_API_KEY);
 const hasDeepgram = () => Boolean(process.env.DEEPGRAM_API_KEY);
-const usable = (v) => (v.provider === 'eleven' ? hasEleven() : hasDeepgram());
+const usable = (v) => (v.provider === 'eleven' ? hasEleven() && (!v.library || process.env.ELEVENLABS_LIBRARY === '1') : hasDeepgram());
 
 export const ttsAvailable = () => hasEleven() || hasDeepgram();
 export const availableVoices = () => Object.entries(VOICES).filter(([, v]) => usable(v));
 export function defaultVoice() {
   const pref = process.env.SELAH_VOICE;
   if (pref && VOICES[pref] && usable(VOICES[pref])) return pref;
-  return hasEleven() ? 'zabra' : 'valerio';
+  return hasEleven() ? 'selah' : 'valerio';
 }
 export const resolveVoice = (id) => (VOICES[id] && usable(VOICES[id]) ? id : defaultVoice());
 
 // Costo aproximado en USD por 1000 caracteres.
-const PRICE = { eleven: 0.09, deepgram: 0.03 };
+// ElevenLabs Turbo usa medio crédito por carácter (plan gratis: 10 000 créditos al mes).
+const PRICE = { eleven: 0.05, deepgram: 0.03 };
 
 async function eleven(text, v) {
-  const model = process.env.ELEVENLABS_TTS_MODEL || 'eleven_multilingual_v2';
+  const model = process.env.ELEVENLABS_TTS_MODEL || 'eleven_turbo_v2_5';
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${v.id}?output_format=mp3_44100_64`, {
     method: 'POST',
     headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },

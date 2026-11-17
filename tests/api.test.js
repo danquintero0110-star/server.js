@@ -348,16 +348,17 @@ test('voz de locutor (ElevenLabs) con respaldo de Deepgram si falla', async () =
   };
   try {
     const voices = (await app.inject({ url: '/api/tts/voices', headers: { cookie } })).json();
-    assert.equal(voices.default, 'zabra');
-    assert.ok(voices.voices.find((v) => v.id === 'zabra').premium);
+    assert.equal(voices.default, 'selah');
+    assert.ok(voices.voices.find((v) => v.id === 'selah').premium);
+    assert.ok(!voices.voices.some((v) => v.id === 'faraon'), 'voces de biblioteca ocultas sin plan de pago');
     const r = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'La paz de Dios sea contigo.' } });
     assert.equal(r.body, 'ELEVEN-mp3');
     elevenOk = false;
-    const fb = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'faraon' } });
+    const fb = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'selah' } });
     assert.equal(fb.statusCode, 200);
     assert.equal(fb.body, 'DG-mp3', 'sin créditos: suena Deepgram');
     elevenOk = true;
-    const again = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'faraon' } });
+    const again = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Otra frase distinta.', voice: 'selah' } });
     assert.equal(again.body, 'ELEVEN-mp3', 'el respaldo no se guardó en caché');
   } finally {
     globalThis.fetch = realFetch;
@@ -365,7 +366,7 @@ test('voz de locutor (ElevenLabs) con respaldo de Deepgram si falla', async () =
   }
   const v2 = (await app.inject({ url: '/api/tts/voices', headers: { cookie } })).json();
   assert.equal(v2.default, 'valerio');
-  assert.ok(!v2.voices.some((v) => v.id === 'zabra'), 'sin llave no se ofrecen voces de ElevenLabs');
+  assert.ok(!v2.voices.some((v) => v.id === 'selah'), 'sin llave no se ofrecen voces de ElevenLabs');
 });
 
 test('nota desde YouTube', async () => {
