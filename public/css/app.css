@@ -600,3 +600,14 @@ textarea.input { height: auto; padding: 14px 18px; resize: none; }
 .shared-tag { display: inline-flex; align-items: center; gap: 4px; color: var(--amber-2); font-weight: 700; }
 .shared-tag svg { width: 14px; }
 .danger-text { color: var(--rose); border-color: color-mix(in oklab, var(--rose) 40%, transparent); }
+
+/* Guía de instalación */
+.install-link { margin-top: 6px; color: var(--text-2); font-weight: 650; }
+.install-steps { margin: 14px 0 6px; padding: 0; list-style: none; counter-reset: st; display: grid; gap: 10px; }
+.install-steps li { position: relative; padding: 12px 14px 12px 50px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); font-size: 15px; line-height: 1.45; counter-increment: st; }
+.install-steps li::before { content: counter(st); position: absolute; left: 12px; top: 11px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 800; background: var(--glow); color: var(--amber-2); }
+.install-others { display: grid; gap: 8px; margin-top: 10px; }
+.install-others[hidden] { display: none; }
+.install-alt { padding: 12px 16px; }
+.install-alt summary { cursor: pointer; font-weight: 700; font-size: 14.5px; }
+.install-alt .install-steps li { background: var(--bg-2); }

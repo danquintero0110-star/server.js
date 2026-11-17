@@ -4,6 +4,7 @@ import { voicePanel } from './selah-voice.js';
 import { focusPanel } from './focus.js';
 import { openStudio, phrasesFrom } from './studio.js';
 import { groupsView, accountSheet, adminSheet, notificationsSheet, shareSheet } from './social.js';
+import { installSheet, isInstalled } from './install.js';
 import { WebRecorder, isSupported as canRecord, pendingRecording, discardPending } from './recorder.js';
 
 const app = document.getElementById('app');
@@ -104,6 +105,7 @@ function loginView() {
     h('h1', { class: 'display' }, 'Selah', h('em', {}, '.')),
     h('p', { class: 'tag' }, 'Haz una pausa. Escucha, guarda y medita lo que Dios habló.'),
     form,
+    isInstalled() ? null : h('button', { class: 'btn ghost block install-link', type: 'button', onclick: installSheet }, '¿Cómo instalarla en mi teléfono?'),
   );
 }
 
@@ -272,6 +274,7 @@ function menuSheet() {
         act('users', 'Familia e iglesia', 'Grupos para compartir prédicas', () => go('/grupos')),
         act('bell', 'Recordatorios', 'Tu devocional cada mañana', notificationsSheet),
         act('key', 'Mi cuenta', 'Cambiar contraseña', () => accountSheet(state.me)),
+        act('share', 'Instalar en el teléfono', 'iPhone, Android y cualquier navegador', installSheet),
         state.me?.isAdmin ? act('users', 'Cuentas', 'Crear cuentas y restablecer contraseñas', adminSheet) : null,
         act(
           'logout',
@@ -1356,4 +1359,5 @@ function downloadIcs(ev) {
 
 // ---------------------------------------------------------------- Arranque
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if (new URLSearchParams(location.search).has('instalar')) setTimeout(installSheet, 700);
 render();

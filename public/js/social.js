@@ -1,6 +1,7 @@
 // Grupos (familia / iglesia), compartir prédicas, mi cuenta, notificaciones y administración.
 import { api } from './api.js';
 import { h, icon, toast, sheet, copyText, shareText, vibrate } from './ui.js';
+import { installText } from './install.js';
 
 const KIND = { familia: 'Familia', iglesia: 'Iglesia' };
 const roleLabel = (r) => (r === 'admin' ? 'Administra' : 'Miembro');
@@ -18,7 +19,7 @@ async function currentSub() {
 }
 
 export async function enablePush(hour = 7) {
-  if (!pushSupported()) throw new Error('Este navegador no permite notificaciones. En iPhone, primero agrega Selah a la pantalla de inicio.');
+  if (!pushSupported()) throw new Error('Este navegador no permite notificaciones. En iPhone, primero agrega Selah a la pantalla de inicio (iOS 16.4 o más reciente).');
   const perm = await Notification.requestPermission();
   if (perm !== 'granted') throw new Error('Permite las notificaciones de Selah en los ajustes del teléfono');
   const { publicKey, available } = await api.get('/api/push');
@@ -42,7 +43,7 @@ export function notificationsSheet() {
     const body = h('div', { class: 'stack' }, h('p', { class: 'muted' }, 'Cargando…'));
     (async () => {
       if (!pushSupported()) {
-        body.replaceChildren(h('p', { class: 'muted' }, 'Este navegador no permite notificaciones. En Android usa Chrome; en iPhone agrega Selah a la pantalla de inicio primero.'));
+        body.replaceChildren(h('p', { class: 'muted' }, 'Este navegador no permite notificaciones. En iPhone, primero agrega Selah a la pantalla de inicio (iOS 16.4 o más reciente). En Android funcionan en Chrome, Samsung Internet, Edge y Firefox.'));
         return;
       }
       const [{ subscriptions }, sub] = await Promise.all([api.get('/api/push'), currentSub().catch(() => null)]);
@@ -109,7 +110,7 @@ export function accountSheet(me) {
 }
 
 // ------------------------------------------------------------------ Administración (cuentas)
-const credText = (u, p) => `Hola 🙌 Te comparto Selah, la app para las notas de las prédicas.\n\nEntra aquí: ${location.origin}\nUsuario: ${u}\nContraseña: ${p}\n\nTip: en Chrome toca ⋮ → "Agregar a pantalla principal".`;
+const credText = (u, p) => `Hola 🙌 Te comparto Selah, la app para las notas de las prédicas.\n\nEntra aquí: ${location.origin}\nUsuario: ${u}\nContraseña: ${p}\n\n${installText()}`;
 
 function credsBox(u, p) {
   const t = credText(u, p);

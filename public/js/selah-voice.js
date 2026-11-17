@@ -576,7 +576,7 @@ function voicePicker() {
 }
 
 export function voicePanel(note, { me, pauseAudio }) {
-  if (!V.canSpeak()) return h('p', { class: 'muted' }, 'Tu navegador no permite que Selah hable. Prueba con Chrome actualizado.');
+  if (!V.canSpeak()) return h('p', { class: 'muted' }, 'Tu navegador no permite que Selah hable. Actualiza tu navegador (Safari, Chrome, Samsung Internet o Edge) e intenta de nuevo.');
   V.setNoteContext(note.id);
   const a = note.analysis;
   const linkDay = Number(new URLSearchParams(location.search).get('dia')) || 0;
