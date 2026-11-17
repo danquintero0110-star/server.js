@@ -7,7 +7,7 @@ import { bookCode, getPassage, parseRef } from '../src/lib/bible.js';
 import { hashPassword, verifyPassword } from '../src/lib/auth.js';
 import { groupWords } from '../src/providers/transcribe.js';
 import { youtubeId } from '../src/lib/media.js';
-import { announcementLine, humanDate, humanTime } from '../src/lib/exporters.js';
+import { announcementLine, clean, humanDate, humanTime } from '../src/lib/exporters.js';
 import { ANALYSIS_SCHEMA, mmss, usageCost } from '../src/providers/ai.js';
 import { resolveVerses } from '../src/lib/pipeline.js';
 
@@ -90,4 +90,8 @@ test('esquema estricto y costo', () => {
   assert.equal(ANALYSIS_SCHEMA.properties.verses.items.properties.book.enum.length, 66);
   assert.equal(mmss(3725), '1:02:05');
   assert.equal(usageCost({ input_tokens: 1e6, output_tokens: 1e5 }), 6);
+});
+
+test('el PDF limpia caracteres que las fuentes estándar no tienen', () => {
+  assert.equal(clean('Fe 🙏 → “amor” ñ á —'), 'Fe -> “amor” ñ á —');
 });

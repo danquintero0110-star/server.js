@@ -1,5 +1,5 @@
 // Service worker: interfaz disponible sin conexión; la API siempre va a la red.
-const VERSION = 'selah-v2';
+const VERSION = 'selah-v3';
 const SHELL = ['/', '/css/app.css', '/js/app.js', '/js/ui.js', '/js/api.js', '/js/recorder.js', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

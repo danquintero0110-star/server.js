@@ -51,7 +51,27 @@ export const SAMPLE_ANALYSIS = {
 };
 
 /** Cliente falso de Anthropic con la misma forma que beta.messages.stream(). */
-export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, chatText = 'Según la prédica [2:30], Pedro se hundió al mirar el viento.' } = {}) {
+export const SAMPLE_STUDY = {
+  introduction: 'Una prédica sobre la fe en medio de la tormenta → con emoji 🙏 que el PDF debe limpiar.',
+  points: [
+    {
+      title: 'La tormenta llega',
+      timestamp_sec: 30,
+      development: 'Primer párrafo del desarrollo.\n\nSegundo párrafo con aplicación.',
+      verses: [
+        { book: 'Mateo', chapter: 14, verse_start: 29, verse_end: 31, role: 'citado', why: 'Pedro camina sobre el agua.' },
+        { book: 'Salmos', chapter: 46, verse_start: 1, verse_end: 1, role: 'complementario', why: 'Dios es nuestro amparo.' },
+        { book: 'Mateo', chapter: 99, verse_start: 1, verse_end: 1, role: 'complementario', why: 'Referencia inexistente: se descarta.' },
+      ],
+      reflection_question: '¿Dónde está tu mirada hoy?',
+    },
+  ],
+  conclusion: 'Conclusión breve.',
+  prayer: 'Señor, ayúdame a mirarte.',
+  memory_verse: { book: 'Juan', chapter: 3, verse_start: 16, verse_end: 16 },
+};
+
+export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY, chatText = 'Según la prédica [2:30], Pedro se hundió al mirar el viento.' } = {}) {
   const calls = [];
   return {
     calls,
@@ -60,7 +80,8 @@ export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, chatText = 'Según l
         stream(params) {
           calls.push(params);
           const isAnalysis = Boolean(params.output_config?.format);
-          const text = isAnalysis ? JSON.stringify(analysis) : chatText;
+          const isStudy = Boolean(params.output_config?.format?.schema?.properties?.introduction);
+          const text = isStudy ? JSON.stringify(study) : isAnalysis ? JSON.stringify(analysis) : chatText;
           const listeners = {};
           return {
             on(ev, fn) {

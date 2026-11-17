@@ -13,6 +13,7 @@ import { BIBLE_VERSION, getPassage, parseRef } from './lib/bible.js';
 import * as exp from './lib/exporters.js';
 import { youtubeId } from './lib/media.js';
 import { chatAboutNote } from './providers/ai.js';
+import { ensureStudy } from './lib/pipeline.js';
 import { availableProvider } from './providers/transcribe.js';
 
 const EXT = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/aac': 'aac', 'audio/flac': 'flac' };
@@ -412,23 +413,29 @@ export function buildApp({ db, queue, logger = false }) {
   });
 
   // --- Exportar ------------------------------------------------------------
-  const passagesFor = (a) => {
-    const map = new Map();
-    for (const v of a.verses || []) {
-      const p = getPassage(db, { code: v.code, chapter: v.chapter, verseStart: v.verse_start, verseEnd: v.verse_end });
-      if (p) map.set(v.reference, p.verses.map((x) => (p.verses.length > 1 ? `${x.verse} ${x.text}` : x.text)).join(' '));
-    }
-    return map;
+  const textFor = (v) => {
+    if (!v?.code) return '';
+    const p = getPassage(db, { code: v.code, chapter: v.chapter, verseStart: v.verse_start, verseEnd: v.verse_end });
+    if (!p) return '';
+    return p.verses.map((x) => (p.verses.length > 1 ? `${x.verse} ${x.text}` : x.text)).join(' ');
   };
 
   app.get('/api/notes/:id/export.pdf', async (req, reply) => {
     const n = getNote(req.params.id);
     if (!n?.analysis_json) return reply.code(404).send({ error: 'La nota aún no está lista' });
-    const a = JSON.parse(n.analysis_json);
+    let a = JSON.parse(n.analysis_json);
+    if (!a.study) {
+      try {
+        a = await ensureStudy(db, n.id);
+      } catch (e) {
+        req.log.warn(`PDF sin estudio desarrollado para ${n.id}: ${e.message}`);
+      }
+    }
     const safe = (n.title || 'nota').normalize('NFD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'nota';
     reply.header('Content-Type', 'application/pdf');
-    reply.header('Content-Disposition', `attachment; filename="${safe}.pdf"`);
-    return reply.send(exp.summaryPdf(n, a, passagesFor(a)));
+    reply.header('Content-Disposition', `${req.query.inline ? 'inline' : 'attachment'}; filename="${safe}.pdf"`);
+    reply.header('Cache-Control', 'no-store');
+    return reply.send(exp.summaryPdf(n, a, textFor));
   });
 
   app.get('/api/notes/:id/whatsapp', async (req, reply) => {

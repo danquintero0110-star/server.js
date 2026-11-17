@@ -147,7 +147,7 @@ export function waLink(text) {
 }
 
 export function mmss(sec) {
-  const s = Math.max(0, Math.floor(sec || 0));
+  const s = Number.isFinite(sec) ? Math.max(0, Math.floor(sec)) : 0;
   const hh = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const r = String(s % 60).padStart(2, '0');

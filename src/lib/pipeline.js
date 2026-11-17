@@ -28,6 +28,35 @@ export function resolveVerses(db, list = []) {
   return out;
 }
 
+const studyInFlight = new Map();
+
+/**
+ * Estudio desarrollado (puntos con sustento bíblico) para el PDF. Se guarda dentro de
+ * analysis_json.study; si ya existe no se vuelve a pagar. Llamadas simultáneas comparten resultado.
+ */
+export function ensureStudy(db, id) {
+  if (studyInFlight.has(id)) return studyInFlight.get(id);
+  const run = (async () => {
+    const n = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+    if (!n?.analysis_json) throw new Error('La nota aún no está lista');
+    const analysis = JSON.parse(n.analysis_json);
+    if (analysis.study) return analysis;
+    const { segments } = JSON.parse(n.transcript_json || '{"segments":[]}');
+    const { study, costUsd } = await deps.ai.developStudy({ segments, analysis, serviceDate: n.preached_at });
+    study.points = (study.points || []).map((p) => ({ ...p, verses: resolveVerses(db, p.verses || []).filter((v) => v.found) }));
+    const [mv] = study.memory_verse ? resolveVerses(db, [study.memory_verse]) : [];
+    study.memory_verse = mv?.found ? mv : null;
+    // Releer por si la nota cambió mientras se generaba (p. ej. reprocesar).
+    const cur = db.prepare('SELECT analysis_json FROM notes WHERE id = ?').get(id);
+    if (!cur?.analysis_json) throw new Error('La nota cambió mientras se preparaba el estudio');
+    const updated = { ...JSON.parse(cur.analysis_json), study };
+    db.prepare("UPDATE notes SET analysis_json = ?, cost_json = json_set(cost_json, '$.study', ?) WHERE id = ?").run(JSON.stringify(updated), costUsd, id);
+    return updated;
+  })().finally(() => studyInFlight.delete(id));
+  studyInFlight.set(id, run);
+  return run;
+}
+
 export function createQueue(db, { log = console } = {}) {
   const pending = [];
   let running = false;
@@ -117,6 +146,12 @@ export function createQueue(db, { log = console } = {}) {
       status: 'ready',
     });
     indexNote(db, id);
+    // El estudio para el PDF se prepara después: la nota ya se puede usar mientras tanto.
+    try {
+      await ensureStudy(db, id);
+    } catch (e) {
+      log.warn?.(`Estudio de ${id} no generado (se reintentará al pedir el PDF): ${e?.message ?? e}`);
+    }
   }
 
   async function drain() {

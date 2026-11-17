@@ -117,6 +117,61 @@ export async function analyzeTranscript({ segments, serviceDate, hint = '' }) {
   return { analysis, costUsd: usageCost(msg.usage), usage: msg.usage };
 }
 
+export const STUDY_SCHEMA = obj({
+  introduction: { ...str, description: 'Contexto y propósito del mensaje, 90-140 palabras' },
+  points: arr(
+    obj({
+      title: str,
+      timestamp_sec: int,
+      development: { ...str, description: 'Desarrollo del punto en 2-3 párrafos (180-260 palabras), separados por \\n\\n' },
+      verses: arr(
+        obj({
+          ...verseRef,
+          role: { type: 'string', enum: ['citado', 'complementario'] },
+          why: { ...str, description: 'Una o dos frases: cómo este pasaje sustenta el punto' },
+        }),
+      ),
+      reflection_question: str,
+    }),
+  ),
+  conclusion: { ...str, description: '80-130 palabras' },
+  prayer: { ...str, description: 'Oración final de 50-80 palabras, en primera persona' },
+  memory_verse: obj(verseRef),
+});
+
+const STUDY_SYSTEM = `Eres un maestro bíblico que convierte una prédica en un estudio escrito, profundo y fiel, en español.
+Reglas:
+- Fidelidad: desarrolla lo que el predicador enseñó. Explica, ordena y profundiza, pero no cambies el mensaje ni inventes anécdotas, nombres o citas del predicador.
+- Desarrolla cada punto principal (usa los mismos puntos y su orden) en 2-3 párrafos: qué enseñó, por qué es bíblico y cómo se vive hoy.
+- Sustento bíblico por punto: 2 a 4 pasajes. Primero los que el predicador citó o leyó (role "citado"). Añade como máximo 2 pasajes "complementario" por punto, solo si son claramente pertinentes y conocidos; nunca inventes referencias.
+- Prefiere pasajes cortos (1 a 6 versículos). Usa el nombre canónico del libro.
+- En "why" explica en una o dos frases cómo el pasaje respalda la enseñanza, considerando su contexto.
+- memory_verse: el versículo que mejor resume el mensaje (preferiblemente uno citado).
+- Tono pastoral, cálido, claro, sin tecnicismos. Sin markdown.`;
+
+export async function developStudy({ segments, analysis, serviceDate }) {
+  const points = (analysis.main_points || []).map((p, i) => `${i + 1}. ${p.title} — ${p.detail} [${mmss(p.timestamp_sec || 0)}]`).join('\n');
+  const cited = (analysis.verses || []).map((v) => v.reference || `${v.book} ${v.chapter}:${v.verse_start}`).join(', ');
+  const stream = getClient().beta.messages.stream({
+    model: config.ai.model,
+    max_tokens: 32000,
+    betas: [FALLBACK_BETA],
+    fallbacks: 'default',
+    output_config: { effort: config.ai.effort, format: { type: 'json_schema', schema: STUDY_SCHEMA } },
+    system: STUDY_SYSTEM,
+    messages: [
+      {
+        role: 'user',
+        content: `Fecha del servicio: ${serviceDate}\nTítulo: ${analysis.title}\nIdea central: ${analysis.central_idea}\n\nPuntos principales:\n${points}\n\nVersículos citados en la prédica: ${cited || 'ninguno detectado'}\n\n<transcripcion>\n${formatTranscript(segments)}\n</transcripcion>`,
+      },
+    ],
+  });
+  const msg = await stream.finalMessage();
+  assertOk(msg);
+  const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  return { study: JSON.parse(text), costUsd: usageCost(msg.usage) };
+}
+
 const CHAT_SYSTEM = `Eres Selah, un compañero de estudio. Respondes preguntas sobre UNA prédica usando su transcripción y notas.
 - Responde en español, breve y cálido (máximo 180 palabras salvo que pidan más).
 - Basa tus respuestas en la prédica. Si algo no se dijo, dilo con honestidad y ofrece una reflexión bíblica general marcada como tal.

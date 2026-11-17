@@ -784,14 +784,75 @@ async function noteView(id) {
       h(
         'div',
         { class: 'export-row' },
-        h('a', { class: 'btn', href: `/api/notes/${note.id}/export.pdf`, download: true }, icon('pdf'), 'PDF'),
+        h('button', { class: 'btn', onclick: pdfSheet }, icon('pdf'), 'PDF'),
         h('button', { class: 'btn primary', onclick: whatsappSheet }, icon('wa'), 'WhatsApp'),
       ),
     ];
   }
 
+  async function pdfSheet() {
+    const label = h('p', { class: 'muted', style: { margin: '6px 0 0' } }, note.analysis?.study ? 'Preparando el PDF…' : 'Preparando tu estudio completo con versículos. La primera vez tarda hasta 1 minuto…');
+    const bar = h('i', { style: { width: '8%' } });
+    const body = h('div', {}, label, h('div', { class: 'progress', style: { marginTop: '14px' } }, bar));
+    const s = sheet(() => [h('h3', {}, 'Estudio en PDF'), body]);
+    let pct = 8;
+    const tick = setInterval(() => {
+      pct = Math.min(92, pct + (92 - pct) * 0.06);
+      bar.style.width = `${pct}%`;
+    }, 700);
+    let blob;
+    try {
+      const res = await fetch(`/api/notes/${note.id}/export.pdf`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Error ${res.status}`);
+      blob = await res.blob();
+    } catch (e) {
+      clearInterval(tick);
+      s.close();
+      toast(e instanceof TypeError ? 'Sin conexión. Revisa tu internet e intenta de nuevo.' : e.message, { error: true, ms: 5000 });
+      return;
+    }
+    clearInterval(tick);
+    if (!note.analysis.study) note = await api.get(`/api/notes/${note.id}`).catch(() => note);
+    const name = `${(note.title || 'estudio').normalize('NFD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'estudio'}.pdf`;
+    const file = new File([blob], name, { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const canShare = navigator.canShare?.({ files: [file] });
+    vibrate(15);
+    body.replaceChildren(
+      h('p', { class: 'muted', style: { margin: '6px 0 0' } }, `Listo · ${Math.max(1, Math.round(blob.size / 1024))} KB`),
+      h(
+        'div',
+        { class: 'export-row', style: { marginTop: '16px' } },
+        h('a', { class: 'btn', href: url, download: name }, icon('pdf'), 'Guardar'),
+        canShare
+          ? h(
+              'button',
+              {
+                class: 'btn primary',
+                onclick: async () => {
+                  try {
+                    await navigator.share({ files: [file], title: note.title });
+                  } catch (e) {
+                    if (e.name !== 'AbortError') toast('No se pudo compartir; usa Guardar', { error: true });
+                  }
+                },
+              },
+              icon('wa'),
+              'Compartir',
+            )
+          : h('a', { class: 'btn primary', href: url, target: '_blank', rel: 'noopener' }, icon('pdf'), 'Abrir'),
+      ),
+    );
+  }
+
   async function whatsappSheet() {
-    const w = await api.get(`/api/notes/${note.id}/whatsapp`);
+    let w;
+    try {
+      w = await api.get(`/api/notes/${note.id}/whatsapp`);
+    } catch (e) {
+      toast(e.status ? e.message : 'Sin conexión. Revisa tu internet e intenta de nuevo.', { error: true, ms: 5000 });
+      return;
+    }
     sheet(() => [
       h('h3', {}, 'Compartir resumen'),
       h('pre', { class: 'card', style: { whiteSpace: 'pre-wrap', padding: '16px', font: '500 14px/1.5 var(--sans)', maxHeight: '42vh', overflow: 'auto', marginTop: '14px' } }, w.summary),
@@ -1087,6 +1148,8 @@ async function noteView(id) {
     const range = h('input', { class: 'range', type: 'range', min: 0, max: 1000, value: 0, 'aria-label': 'Posición' });
     const cur = h('span', {}, '0:00');
     const dur = h('span', {}, mmss(note.durationSec));
+    // Las grabaciones del navegador (webm) pueden reportar duración "Infinity": se usa la guardada.
+    const D = () => (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : note.durationSec || 0);
     const speeds = [1, 1.25, 1.5, 2, 0.8];
     let si = 0;
     const speed = h('button', { 'aria-label': 'Velocidad' }, '1×');
@@ -1101,22 +1164,21 @@ async function noteView(id) {
     let dragging = false;
     range.addEventListener('input', () => {
       dragging = true;
-      const d = audio.duration || note.durationSec;
-      cur.textContent = mmss((range.value / 1000) * d);
+      cur.textContent = mmss((range.value / 1000) * D());
       range.style.setProperty('--p', `${range.value / 10}%`);
     });
     range.addEventListener('change', () => {
       dragging = false;
-      audio.currentTime = (range.value / 1000) * (audio.duration || note.durationSec);
+      audio.currentTime = (range.value / 1000) * D();
     });
     audio.addEventListener('timeupdate', () => {
       if (dragging) return;
-      const d = audio.duration || note.durationSec || 1;
+      const d = D() || 1;
       range.value = (audio.currentTime / d) * 1000;
       range.style.setProperty('--p', `${(audio.currentTime / d) * 100}%`);
       cur.textContent = mmss(audio.currentTime);
     });
-    audio.addEventListener('loadedmetadata', () => (dur.textContent = mmss(audio.duration)));
+    audio.addEventListener('loadedmetadata', () => (dur.textContent = mmss(D())));
     player = h(
       'div',
       { class: 'player' },

@@ -56,6 +56,21 @@ export async function ensurePlayable(input, mime, outDir, id) {
   try {
     size = fs.statSync(input).size;
   } catch {}
+  // Ya procesado antes (p. ej. al reprocesar): no reescribir un archivo sobre sí mismo.
+  if (path.basename(input).startsWith(`${id}-play.`)) return { file: path.basename(input), mime: base || 'audio/mp4' };
+  if (base === 'audio/webm' && size <= MAX_KEEP_BYTES) {
+    // Las grabaciones del navegador no traen duración ni índice: se reescriben (sin recomprimir)
+    // para que el reproductor muestre el tiempo total y se pueda saltar a cualquier minuto.
+    const out = path.join(outDir, `${id}-play.webm`);
+    try {
+      await run(config.bin.ffmpeg, ['-y', '-i', input, '-map', '0:a', '-c', 'copy', out]);
+      fs.rmSync(input, { force: true });
+      return { file: path.basename(out), mime: 'audio/webm' };
+    } catch {
+      fs.rmSync(out, { force: true });
+      return { file: path.basename(input), mime: base };
+    }
+  }
   if (PLAYABLE.has(base) && size <= MAX_KEEP_BYTES) return { file: path.basename(input), mime: base };
   const out = path.join(outDir, `${id}-play.m4a`);
   await run(config.bin.ffmpeg, ['-y', '-i', input, '-vn', '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-movflags', '+faststart', out]);

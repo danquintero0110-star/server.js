@@ -190,6 +190,32 @@ test('exportar WhatsApp y PDF', async () => {
   const pdf = await app.inject({ url: `/api/notes/${noteId}/export.pdf`, headers: { cookie } });
   assert.equal(pdf.headers['content-type'], 'application/pdf');
   assert.equal(pdf.rawPayload.subarray(0, 4).toString(), '%PDF');
+  assert.ok(pdf.rawPayload.length > 5000);
+});
+
+test('estudio desarrollado: versículos resueltos, costo guardado y sin pagar dos veces', async () => {
+  const n = (await app.inject({ url: `/api/notes/${noteId}`, headers: { cookie } })).json();
+  const st = n.analysis.study;
+  assert.ok(st, 'el estudio se genera tras el análisis');
+  assert.deepEqual(
+    st.points[0].verses.map((v) => [v.reference, v.role]),
+    [['Mateo 14:29-31', 'citado'], ['Salmos 46:1', 'complementario']],
+  );
+  assert.equal(st.memory_verse.reference, 'Juan 3:16');
+  assert.ok(n.cost.study > 0);
+  const before = anthropic.calls.filter((c) => c.output_config?.format?.schema?.properties?.introduction).length;
+  const pdf = await app.inject({ url: `/api/notes/${noteId}/export.pdf`, headers: { cookie } });
+  assert.equal(pdf.statusCode, 200);
+  const after = anthropic.calls.filter((c) => c.output_config?.format?.schema?.properties?.introduction).length;
+  assert.equal(after, before);
+  // Si el estudio falta (nota anterior a esta función), el PDF lo genera al pedirlo.
+  const row = db.prepare('SELECT analysis_json FROM notes WHERE id = ?').get(noteId);
+  const a = JSON.parse(row.analysis_json);
+  delete a.study;
+  db.prepare('UPDATE notes SET analysis_json = ? WHERE id = ?').run(JSON.stringify(a), noteId);
+  const pdf2 = await app.inject({ url: `/api/notes/${noteId}/export.pdf`, headers: { cookie } });
+  assert.equal(pdf2.statusCode, 200);
+  assert.ok(JSON.parse(db.prepare('SELECT analysis_json FROM notes WHERE id = ?').get(noteId).analysis_json).study);
 });
 
 test('chat sobre la nota con streaming y memoria', async () => {
@@ -211,7 +237,8 @@ test('nota desde YouTube', async () => {
   const n = await waitReady(r.json().id);
   assert.equal(n.status, 'ready', n.error);
   assert.equal(n.preachedAt, '2026-11-08');
-  assert.match(anthropic.calls.at(-1).messages[0].content, /YouTube "Culto dominical"/);
+  const analysisCall = anthropic.calls.findLast((c) => c.output_config?.format && !c.output_config.format.schema?.properties?.introduction);
+  assert.match(analysisCall.messages[0].content, /YouTube "Culto dominical"/);
 });
 
 test('errores del proceso quedan visibles y se puede reintentar', async () => {
