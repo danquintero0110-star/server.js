@@ -60,6 +60,7 @@ function focusText(note, f) {
 }
 
 export function focusPanel(note, { me, onChange }) {
+  V.setNoteContext(note.id);
   const a = note.analysis;
   a.focus ||= {};
   const list = h('div', { class: 'fx-list' });

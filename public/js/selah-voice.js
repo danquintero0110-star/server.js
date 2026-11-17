@@ -519,8 +519,60 @@ async function memorize(note) {
 }
 
 // ------------------------------------------------------------------ Panel de la pestaña
+function voicePicker() {
+  const box = h('div', { class: 'v-voices' });
+  const render = (list) => {
+    const cur = V.getVoiceId();
+    const opt = (id, label, desc) =>
+      h(
+        'div',
+        { class: `v-voice${cur === id ? ' on' : ''}` },
+        h(
+          'button',
+          {
+            class: 'v-voice-pick',
+            onclick: () => {
+              V.setVoiceId(id);
+              vibrate(8);
+              render(list);
+              V.stopSpeaking();
+              V.previewVoice(id);
+            },
+          },
+          h('b', {}, label),
+          h('small', {}, desc),
+        ),
+        h(
+          'button',
+          {
+            class: 'icon-btn small',
+            'aria-label': `Escuchar a ${label}`,
+            onclick: () => {
+              V.stopSpeaking();
+              V.previewVoice(id);
+            },
+          },
+          icon('play'),
+        ),
+      );
+    const curLabel = cur === 'device' ? 'Teléfono' : list.find((v) => v.id === cur)?.label || '';
+    const tag = box.parentElement?.querySelector('.v-voice-cur');
+    if (tag) tag.textContent = curLabel;
+    box.replaceChildren(
+      ...list.map((v) => opt(v.id, v.label, v.desc)),
+      opt('device', 'Voz del teléfono', 'Gratis, más robótica · funciona sin internet'),
+    );
+  };
+  api
+    .get('/api/tts/voices')
+    .then((r) => (r.available ? render(r.voices) : render([])))
+    .catch(() => render([]));
+  return h('details', { class: 'card v-voice-box' }, h('summary', {}, icon('headphones'), 'Voz de Selah', h('span', { class: 'v-voice-cur' }, '')), box);
+}
+
 export function voicePanel(note, { me, pauseAudio }) {
   if (!V.canSpeak()) return h('p', { class: 'muted' }, 'Tu navegador no permite que Selah hable. Prueba con Chrome actualizado.');
+  V.setNoteContext(note.id);
   const a = note.analysis;
   const day = dayForToday(note);
   const memKey = Number(localStorage.getItem(`selah-mem-${note.id}`)) || 0;
@@ -560,6 +612,7 @@ export function voicePanel(note, { me, pauseAudio }) {
           ),
         )
       : null,
-    h('p', { class: 'faint', style: { fontSize: '12.5px', marginTop: '14px' } }, 'La voz es la del propio teléfono. Tus palabras solo se usan para responderte y quedan en "Preguntar".'),
+    voicePicker(),
+    h('p', { class: 'faint', style: { fontSize: '12.5px', marginTop: '14px' } }, 'Tus palabras solo se usan para responderte y quedan guardadas en "Preguntar".'),
   ];
 }

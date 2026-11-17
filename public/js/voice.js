@@ -1,14 +1,28 @@
-// Voz de Selah: hablar (síntesis del teléfono) y escuchar (clips que transcribe el servidor).
-// Sin llaves extra: la voz usa las voces en español del propio teléfono.
+// Voz de Selah: hablar y escuchar.
+// Hablar: voz humana del servidor (Deepgram Aura-2, p. ej. "Valerio"); si falla, la voz del teléfono.
+// Escuchar: clips cortos que transcribe el servidor.
 
 const synth = typeof window !== 'undefined' ? window.speechSynthesis : null;
+const store = typeof localStorage !== 'undefined' ? localStorage : { getItem: () => null, setItem() {} };
 
-export const canSpeak = () => Boolean(synth && typeof SpeechSynthesisUtterance !== 'undefined');
+export const canSpeak = () => typeof Audio !== 'undefined' || Boolean(synth);
 export const canListen = () => Boolean(typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined');
 
+// ---- Preferencia de voz ('device' = la del teléfono)
+const VOICE_KEY = 'selah-voice-id';
+export const getVoiceId = () => store.getItem(VOICE_KEY) || 'valerio';
+export const setVoiceId = (id) => store.setItem(VOICE_KEY, id);
+let noteId = '';
+/** Para registrar el costo de la voz en la nota que se está escuchando. */
+export const setNoteContext = (id) => (noteId = id || '');
+let cloudDownUntil = 0;
+const useCloud = () => getVoiceId() !== 'device' && Date.now() > cloudDownUntil && typeof fetch !== 'undefined';
+
+// ---- Voz del teléfono (respaldo)
 let chosen = null;
 function voices() {
   return new Promise((resolve) => {
+    if (!synth) return resolve([]);
     const v = synth.getVoices();
     if (v.length) return resolve(v);
     const done = () => resolve(synth.getVoices());
@@ -17,7 +31,7 @@ function voices() {
   });
 }
 
-/** La voz en español más natural disponible (prefiere Latinoamérica y voces "naturales"). */
+/** La voz del teléfono en español más natural (prefiere Latinoamérica y voces "naturales"). */
 export async function pickVoice() {
   if (chosen) return chosen;
   const list = (await voices()).filter((v) => /^es([-_]|$)/i.test(v.lang));
@@ -42,7 +56,7 @@ export function forSpeech(text) {
     .trim();
 }
 
-/** Corta en frases (las voces de Android se cortan con textos largos). */
+/** Corta en frases (para subtítulos, para que la voz empiece rápido y para no exceder límites). */
 export function sentences(text) {
   const out = [];
   for (const s of forSpeech(text).match(/[^.!?¡¿;:]+[.!?;:]*|[¡¿][^.!?]+[.!?]*/g) || []) {
@@ -50,9 +64,71 @@ export function sentences(text) {
     if (!t) continue;
     const last = out[out.length - 1];
     if (last && (last.length < 40 || t.length < 12) && last.length + t.length < 220) out[out.length - 1] += ` ${t}`;
+    else if (t.length > 900) out.push(...(t.match(/.{1,700}(\s|$)/g) || [t]).map((x) => x.trim()));
     else out.push(t);
   }
   return out;
+}
+
+// ---- Voz humana del servidor
+const cache = new Map(); // "voz|texto" → Promise<objectURL>
+function cloudUrl(text, voice = getVoiceId()) {
+  const key = `${voice}|${text}`;
+  if (cache.has(key)) return cache.get(key);
+  const p = fetch('/api/tts', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice, noteId }),
+  })
+    .then((r) => {
+      if (!r.ok) throw new Error(`tts ${r.status}`);
+      return r.blob();
+    })
+    .then((b) => URL.createObjectURL(b));
+  p.catch(() => cache.delete(key));
+  cache.set(key, p);
+  if (cache.size > 80) {
+    const [oldKey, oldP] = cache.entries().next().value;
+    cache.delete(oldKey);
+    oldP.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  }
+  return p;
+}
+/** Pide el audio por adelantado para que no haya pausas entre frases. */
+export function prefetch(text) {
+  if (text && useCloud()) cloudUrl(text).catch(() => {});
+}
+
+let audioEl = null;
+let stopCurrent = null;
+let playingCloud = false;
+function cloudSay(t, rate, my) {
+  return cloudUrl(t).then(
+    (url) =>
+      new Promise((resolve, reject) => {
+        if (my !== token) return resolve();
+        audioEl ||= new Audio();
+        const a = audioEl;
+        const finish = (err) => {
+          a.onended = a.onerror = null;
+          playingCloud = false;
+          stopCurrent = null;
+          err ? reject(err) : resolve();
+        };
+        stopCurrent = () => {
+          a.pause();
+          finish();
+        };
+        a.onended = () => finish();
+        a.onerror = () => finish(new Error('audio'));
+        a.src = url;
+        a.playbackRate = rate;
+        a.preservesPitch = true;
+        playingCloud = true;
+        a.play().catch(finish);
+      }),
+  );
 }
 
 let token = 0;
@@ -62,17 +138,33 @@ let keepAlive = 0;
 export async function speak(text, { rate = 1, onSentence } = {}) {
   if (!canSpeak()) return;
   const my = ++token;
-  const voice = await pickVoice();
   const parts = sentences(text);
+  prefetch(parts[0]);
+  prefetch(parts[1]);
   for (let i = 0; i < parts.length; i++) {
     if (my !== token) return;
+    prefetch(parts[i + 1]);
+    prefetch(parts[i + 2]);
     onSentence?.(i, parts[i]);
-    await sayOne(parts[i], voice, rate, my);
+    await sayOne(parts[i], rate, my);
   }
 }
 
-function sayOne(t, voice, rate, my) {
+async function sayOne(t, rate, my) {
+  if (useCloud()) {
+    try {
+      return await cloudSay(t, rate, my);
+    } catch {
+      if (my !== token) return;
+      cloudDownUntil = Date.now() + 60000; // un minuto con la voz del teléfono y se reintenta
+    }
+  }
+  return deviceSay(t, await pickVoice(), rate, my);
+}
+
+function deviceSay(t, voice, rate, my) {
   return new Promise((resolve) => {
+    if (!synth || my !== token) return resolve();
     const u = new SpeechSynthesisUtterance(t);
     if (voice) u.voice = voice;
     u.lang = voice?.lang || 'es-MX';
@@ -102,12 +194,24 @@ function sayOne(t, voice, rate, my) {
 export function stopSpeaking() {
   token++;
   clearInterval(keepAlive);
+  stopCurrent?.();
   try {
     synth?.cancel();
   } catch {}
 }
 
-export const isSpeaking = () => Boolean(synth?.speaking);
+export const isSpeaking = () => playingCloud || Boolean(synth?.speaking);
+
+/** Escucha una muestra de una voz. */
+export async function previewVoice(id) {
+  const prev = getVoiceId();
+  setVoiceId(id);
+  try {
+    await speak('Hola, soy Selah. Qué gusto acompañarte. Vamos juntos a la palabra de Dios.');
+  } finally {
+    setVoiceId(prev);
+  }
+}
 
 /**
  * Habla mientras llega el texto (streaming del chat): dice cada frase en cuanto se completa.
@@ -121,21 +225,23 @@ export function streamSpeaker({ rate = 1, onSentence } = {}) {
   let ended = false;
   let resolveAll;
   const all = new Promise((r) => (resolveAll = r));
-  let voice = null;
-  const ready = pickVoice().then((v) => (voice = v));
 
   async function pump() {
     if (playing) return;
-    await ready;
     while (queue.length && my === token) {
       const t = queue.shift();
+      prefetch(queue[0]);
       onSentence?.(t);
-      playing = sayOne(t, voice, rate, my);
+      playing = sayOne(t, rate, my);
       await playing;
       playing = null;
     }
     if (ended && !queue.length) resolveAll();
     if (my !== token) resolveAll();
+  }
+  function enqueue(t) {
+    queue.push(t);
+    prefetch(t);
   }
   function flush(force) {
     const re = /^([\s\S]*?[.!?;:])(\s|$)/;
@@ -143,10 +249,10 @@ export function streamSpeaker({ rate = 1, onSentence } = {}) {
     while ((m = re.exec(buf)) && (m[1].length >= 30 || force)) {
       const t = forSpeech(m[1]);
       buf = buf.slice(m[0].length);
-      if (t) queue.push(t);
+      if (t) enqueue(t);
     }
     if (force && forSpeech(buf)) {
-      queue.push(forSpeech(buf));
+      enqueue(forSpeech(buf));
       buf = '';
     }
     pump();

@@ -296,6 +296,39 @@ test('mi marca: nombre, redes y logo', async () => {
   assert.equal((await app.inject({ url: '/api/me/logo', headers: { cookie } })).statusCode, 404);
 });
 
+test('voz humana: lista de voces, audio con caché y límites', async () => {
+  const voices = (await app.inject({ url: '/api/tts/voices', headers: { cookie } })).json();
+  assert.equal(voices.default, 'valerio');
+  assert.ok(voices.voices.some((v) => v.id === 'valerio' && v.gender === 'm'));
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).startsWith('https://api.deepgram.com/v1/speak')) {
+      seen.push({ url: String(url), body: JSON.parse(opts.body) });
+      return new Response(Buffer.from('ID3fake-mp3'), { status: 200, headers: { 'content-type': 'audio/mpeg' } });
+    }
+    return realFetch(url, opts);
+  };
+  try {
+    const r = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Hola, soy Selah.', voice: 'valerio', noteId } });
+    assert.equal(r.statusCode, 200, r.body);
+    assert.equal(r.headers['content-type'], 'audio/mpeg');
+    assert.equal(r.body, 'ID3fake-mp3');
+    assert.match(seen[0].url, /model=aura-2-valerio-es/);
+    const again = await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Hola,   soy Selah.', voice: 'valerio' } });
+    assert.equal(again.body, 'ID3fake-mp3');
+    assert.equal(seen.length, 1, 'la segunda vez sale de la caché');
+    await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'Hola, soy Selah.', voice: 'no-existe' } });
+    assert.equal(seen.length, 1, 'voz desconocida usa la predeterminada (ya en caché)');
+    assert.equal((await app.inject({ method: 'POST', url: '/api/tts', headers: { cookie }, payload: { text: 'x'.repeat(1801) } })).statusCode, 400);
+    assert.equal((await app.inject({ method: 'POST', url: '/api/tts', payload: { text: 'hola' } })).statusCode, 401);
+    const n = (await app.inject({ url: `/api/notes/${noteId}`, headers: { cookie } })).json();
+    assert.ok(n.cost.tts > 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('nota desde YouTube', async () => {
   const bad = await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie }, payload: { youtubeUrl: 'https://vimeo.com/1' } });
   assert.equal(bad.statusCode, 400);

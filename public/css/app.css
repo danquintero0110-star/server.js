@@ -562,3 +562,14 @@ textarea.input { height: auto; padding: 14px 18px; resize: none; }
 .st-toggle { display: flex; gap: 10px; align-items: center; font-size: 14.5px; }
 .st-toggle input { width: 20px; height: 20px; accent-color: var(--amber); }
 .st-actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; padding-top: 8px; }
+
+.v-voice-box { margin-top: 14px; padding: 14px 16px; }
+.v-voice-box summary { display: flex; gap: 8px; align-items: center; font-weight: 800; cursor: pointer; list-style: none; }
+.v-voice-box summary svg { width: 18px; color: var(--amber); }
+.v-voices { display: grid; gap: 8px; margin-top: 12px; }
+.v-voice { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 10px 10px 10px 14px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
+.v-voice.on { border-color: var(--amber); background: var(--glow); }
+.v-voice-pick { text-align: left; display: grid; gap: 2px; }
+.v-voice-pick small { color: var(--text-2); font-size: 12.5px; }
+.v-voice .icon-btn.small { width: 38px; height: 38px; }
+.v-voice-cur { margin-left: auto; font-weight: 700; color: var(--amber-2); font-size: 13.5px; }

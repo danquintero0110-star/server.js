@@ -15,6 +15,7 @@ import { youtubeId } from './lib/media.js';
 import { chatAboutNote } from './providers/ai.js';
 import { deps as pipelineDeps, ensureFocus, ensureStudy, focusKey } from './lib/pipeline.js';
 import { availableProvider } from './providers/transcribe.js';
+import * as tts from './providers/tts.js';
 
 const EXT = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/aac': 'aac', 'audio/flac': 'flac' };
 
@@ -602,6 +603,68 @@ export function buildApp({ db, queue, logger = false }) {
     if (a.focus) delete a.focus[req.params.key];
     db.prepare('UPDATE notes SET analysis_json = ? WHERE id = ?').run(JSON.stringify(a), n.id);
     return { ok: true };
+  });
+
+  // --- Voz humana de Selah (texto → audio), con caché en disco -----------------
+  const ttsDir = () => path.join(config.dataDir, 'tts');
+  const TTS_CACHE_MAX = 250 * 1048576;
+  let ttsBytesSinceClean = Infinity;
+  const cleanTts = () => {
+    try {
+      const files = fs.readdirSync(ttsDir()).map((f) => {
+        const st = fs.statSync(path.join(ttsDir(), f));
+        return { f, size: st.size, t: st.atimeMs || st.mtimeMs };
+      });
+      let total = files.reduce((n, x) => n + x.size, 0);
+      for (const x of files.sort((a, b) => a.t - b.t)) {
+        if (total <= TTS_CACHE_MAX * 0.8) break;
+        fs.rmSync(path.join(ttsDir(), x.f), { force: true });
+        total -= x.size;
+      }
+    } catch {}
+    ttsBytesSinceClean = 0;
+  };
+  app.get('/api/tts/voices', async () => ({
+    available: tts.ttsAvailable(),
+    default: tts.DEFAULT_VOICE,
+    voices: Object.entries(tts.VOICES).map(([id, v]) => ({ id, label: v.label, desc: v.desc, gender: v.gender })),
+  }));
+  app.post('/api/tts', async (req, reply) => {
+    if (!tts.ttsAvailable()) return reply.code(503).send({ error: 'Voz no disponible' });
+    const text = String(req.body?.text || '').replace(/\s+/g, ' ').trim();
+    const voice = tts.VOICES[req.body?.voice] ? req.body.voice : tts.DEFAULT_VOICE;
+    if (!text) return reply.code(400).send({ error: 'Falta el texto' });
+    if (text.length > 1800) return reply.code(400).send({ error: 'Texto demasiado largo' });
+    const hash = crypto.createHash('sha256').update(`${voice}\n${text}`).digest('hex').slice(0, 40);
+    const file = path.join(ttsDir(), `${hash}.mp3`);
+    reply.header('Content-Type', 'audio/mpeg').header('Cache-Control', 'private, max-age=86400');
+    if (fs.existsSync(file)) {
+      const now = new Date();
+      fs.utimesSync(file, now, now);
+      return reply.send(fs.createReadStream(file));
+    }
+    if (freeBytes(config.dataDir) < config.minFreeMb * 1048576) {
+      // Sin espacio para caché: se genera igual pero no se guarda.
+      const { audio } = await tts.synthesize(text, voice);
+      return reply.send(audio);
+    }
+    let out;
+    try {
+      out = await tts.synthesize(text, voice);
+    } catch (e) {
+      req.log.warn(e.message);
+      return reply.code(502).send({ error: 'La voz no respondió' });
+    }
+    fs.mkdirSync(ttsDir(), { recursive: true });
+    fs.writeFileSync(`${file}.tmp`, out.audio);
+    fs.renameSync(`${file}.tmp`, file);
+    ttsBytesSinceClean += out.audio.length;
+    if (ttsBytesSinceClean > 20 * 1048576) cleanTts();
+    const noteId = String(req.body?.noteId || '');
+    if (noteId && getNote(noteId, req.user.id)) {
+      db.prepare("UPDATE notes SET cost_json = json_set(cost_json, '$.tts', round(coalesce(json_extract(cost_json, '$.tts'), 0) + ?, 4)) WHERE id = ?").run(out.costUsd, noteId);
+    }
+    return reply.send(out.audio);
   });
 
   // --- Voz: escuchar lo que dice la persona (clips cortos) ---------------------
