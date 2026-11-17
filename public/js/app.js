@@ -1,5 +1,6 @@
 import { api } from './api.js';
 import { h, icon, LOGO, toast, sheet, copyText, shareText, waLink, mmss, dateParts, longDate, vibrate } from './ui.js';
+import { voicePanel } from './selah-voice.js';
 import { WebRecorder, isSupported as canRecord, pendingRecording, discardPending } from './recorder.js';
 
 const app = document.getElementById('app');
@@ -547,6 +548,7 @@ function recordView() {
 // ---------------------------------------------------------------- Nota
 const TABS = [
   ['resumen', 'Resumen'],
+  ['voz', 'Selah habla'],
   ['versiculos', 'Versículos'],
   ['anuncios', 'Anuncios'],
   ['celula', 'Célula'],
@@ -730,7 +732,8 @@ async function noteView(id) {
   function panelFor(key) {
     timeListeners.clear();
     const panel = h('section', { class: 'panel', role: 'tabpanel' });
-    const builders = { resumen, versiculos, anuncios, celula, devocional, redes, transcripcion, chat };
+    const voz = () => voicePanel(note, { me: state.me, pauseAudio: () => audio.pause() });
+    const builders = { resumen, voz, versiculos, anuncios, celula, devocional, redes, transcripcion, chat };
     panel.append(...[builders[key]?.()].flat().filter(Boolean));
     return panel;
   }

@@ -13,7 +13,7 @@ import { BIBLE_VERSION, getPassage, parseRef } from './lib/bible.js';
 import * as exp from './lib/exporters.js';
 import { youtubeId } from './lib/media.js';
 import { chatAboutNote } from './providers/ai.js';
-import { ensureStudy } from './lib/pipeline.js';
+import { deps as pipelineDeps, ensureStudy } from './lib/pipeline.js';
 import { availableProvider } from './providers/transcribe.js';
 
 const EXT = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/aac': 'aac', 'audio/flac': 'flac' };
@@ -469,6 +469,9 @@ export function buildApp({ db, queue, logger = false }) {
     if (!n?.transcript_json) return reply.code(404).send({ error: 'La nota aún no tiene transcripción' });
     const question = String(req.body?.question || '').trim().slice(0, 2000);
     if (!question) return reply.code(400).send({ error: 'Escribe una pregunta' });
+    const mode = ['voz', 'devocional'].includes(req.body?.mode) ? req.body.mode : 'texto';
+    const analysisObj = n.analysis_json ? JSON.parse(n.analysis_json) : null;
+    const devotionalDay = mode === 'devocional' ? (analysisObj?.devotional || []).find((d) => d.day === Number(req.body?.day)) || null : null;
     const history = db.prepare('SELECT role, content FROM chat_messages WHERE note_id = ? ORDER BY id DESC LIMIT 20').all(n.id).reverse();
 
     reply.hijack();
@@ -479,9 +482,11 @@ export function buildApp({ db, queue, logger = false }) {
       const out = await chatAboutNote({
         note: n,
         segments: JSON.parse(n.transcript_json).segments,
-        analysis: n.analysis_json ? JSON.parse(n.analysis_json) : null,
+        analysis: analysisObj,
         history,
         question,
+        mode,
+        devotionalDay,
         onText: (t) => send('delta', { text: t }),
       });
       const ins = db.prepare('INSERT INTO chat_messages (note_id, role, content) VALUES (?, ?, ?)');
@@ -496,6 +501,49 @@ export function buildApp({ db, queue, logger = false }) {
       send('error', { error: e.message || 'Error del asistente' });
     }
     res.end();
+  });
+
+  // --- Voz: escuchar lo que dice la persona (clips cortos) ---------------------
+  const MAX_CLIP = 6 * 1048576;
+  app.post('/api/notes/:id/listen', async (req, reply) => {
+    const n = getNote(req.params.id);
+    if (!n) return reply.code(404).send({ error: 'Nota no encontrada' });
+    const stream = req.body;
+    if (!stream || typeof stream.pipe !== 'function') return reply.code(400).send({ error: 'Envía el audio como application/octet-stream' });
+    const mime = String(req.headers['x-audio-mime'] || 'audio/webm').split(';')[0];
+    if (!/^audio\/[\w.+-]+$/.test(mime)) return reply.code(400).send({ error: 'Tipo de audio no válido' });
+    const tmpDir = path.join(config.dataDir, 'tmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const file = path.join(tmpDir, `${crypto.randomUUID()}.clip`);
+    try {
+      let size = 0;
+      await pump(
+        stream,
+        async function* (src) {
+          for await (const c of src) {
+            size += c.length;
+            if (size > MAX_CLIP) throw Object.assign(new Error('El audio es demasiado largo'), { statusCode: 413 });
+            yield c;
+          }
+        },
+        fs.createWriteStream(file),
+      );
+      if (size < 1000) return { text: '' };
+      let t;
+      try {
+        t = await pipelineDeps.stt.transcribe(file, mime);
+      } catch (e) {
+        if (/vac[ií]a/i.test(e.message)) return { text: '' };
+        throw e;
+      }
+      db.prepare("UPDATE notes SET cost_json = json_set(cost_json, '$.voice', round(coalesce(json_extract(cost_json, '$.voice'), 0) + ?, 4)) WHERE id = ?").run(t.costUsd || 0, n.id);
+      return { text: t.segments.map((x) => x.text).join(' ').replace(/\s+/g, ' ').trim() };
+    } catch (e) {
+      if (e.statusCode === 413) return reply.code(413).send({ error: e.message });
+      throw e;
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
   });
 
   // --- SPA -----------------------------------------------------------------

@@ -95,3 +95,13 @@ test('esquema estricto y costo', () => {
 test('el PDF limpia caracteres que las fuentes estándar no tienen', () => {
   assert.equal(clean('Fe 🙏 → “amor” ñ á —'), 'Fe -> “amor” ñ á —');
 });
+
+test('voz: lectura natural de referencias y calificación al recitar', async () => {
+  const V = await import('../public/js/voice.js');
+  assert.equal(V.forSpeech('Lee Juan 3:16 y Mateo 14:29-31 [2:30] **ya**'), 'Lee Juan 3, versículo 16 y Mateo 14, versículos 29 al 31 ya');
+  const r = V.compareRecital('Por lo cual dice: Despiértate, tú que duermes.', 'por lo cual dice despiertate tu que duermes');
+  assert.equal(r.score, 100);
+  const r2 = V.compareRecital('Por lo cual dice: Despiértate, tú que duermes.', 'por lo cual');
+  assert.ok(r2.score < 50);
+  assert.deepEqual(r2.missing, ['dice:', 'Despiértate,', 'tú', 'que', 'duermes.']);
+});

@@ -75,12 +75,24 @@ export const api = {
     return req('POST', `/api/uploads/${id}/finish`);
   },
 
+  /** Transcribe un clip de voz corto. */
+  async listen(id, blob) {
+    const res = await fetch(`/api/notes/${id}/listen`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Audio-Mime': blob.type || 'audio/webm' },
+      body: blob,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(data.error || `Error ${res.status}`, res.status);
+    return data.text || '';
+  },
+
   /** Chat con eventos SSE sobre POST. */
-  async chat(id, question, { onDelta }) {
+  async chat(id, question, { onDelta, mode, day } = {}) {
     const res = await fetch(`/api/notes/${id}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, mode, day }),
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));

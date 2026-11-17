@@ -179,7 +179,22 @@ const CHAT_SYSTEM = `Eres Selah, un compañero de estudio. Respondes preguntas s
 - Texto plano, sin encabezados markdown.`;
 
 /** Chat sobre una nota. onText recibe fragmentos para streaming. */
-export async function chatAboutNote({ note, segments, analysis, history, question, onText }) {
+const VOICE_RULES = `
+MODO VOZ: tu respuesta se leerá en voz alta en una conversación.
+- 2 a 4 frases naturales, como alguien que platica con calidez. Nada de listas, títulos, asteriscos, emojis ni marcas de tiempo.
+- Si citas la Biblia, di la referencia de forma hablada (por ejemplo "Juan tres dieciséis").
+- Cuando ayude, termina con una pregunta breve que invite a seguir platicando.`;
+
+function devotionalRules(d) {
+  if (!d) return '';
+  return `
+DEVOCIONAL GUIADO: estás acompañando a la persona en el día ${d.day} del devocional de esta prédica: "${d.title}" (${d.reference || ''}).
+Reflexión del día: ${d.reflection}
+Acción sugerida: ${d.action}
+La persona acaba de compartir su respuesta a la pregunta del día. Responde como un consejero pastoral cálido: valida lo que compartió, conéctalo con el pasaje y con la prédica, y propón un paso concreto para hoy. No juzgues ni diagnostiques.`;
+}
+
+export async function chatAboutNote({ note, segments, analysis, history, question, onText, mode = 'texto', devotionalDay = null }) {
   const context = `Título: ${note.title}\nPredicador: ${note.preacher || 'no indicado'}\nFecha: ${note.preached_at}\n\nIdea central: ${
     analysis?.central_idea || ''
   }\n\n<transcripcion>\n${formatTranscript(segments)}\n</transcripcion>`;
@@ -192,6 +207,7 @@ export async function chatAboutNote({ note, segments, analysis, history, questio
     system: [
       { type: 'text', text: CHAT_SYSTEM },
       { type: 'text', text: context, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      ...(mode === 'voz' || mode === 'devocional' ? [{ type: 'text', text: VOICE_RULES + (mode === 'devocional' ? devotionalRules(devotionalDay) : '') }] : []),
     ],
     messages: [...history.map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: question }],
   });

@@ -230,6 +230,35 @@ test('chat sobre la nota con streaming y memoria', async () => {
   assert.equal(hist[1].role, 'assistant');
 });
 
+test('voz: escuchar un clip y responder en modo voz y devocional', async () => {
+  const r = await app.inject({
+    method: 'POST',
+    url: `/api/notes/${noteId}/listen`,
+    headers: { cookie, 'content-type': 'application/octet-stream', 'x-audio-mime': 'audio/webm' },
+    body: Buffer.alloc(4000, 1),
+  });
+  assert.equal(r.statusCode, 200, r.body);
+  assert.match(r.json().text, /retiro de jóvenes/);
+  // Clip vacío o casi vacío: sin texto y sin pagar.
+  const empty = await app.inject({ method: 'POST', url: `/api/notes/${noteId}/listen`, headers: { cookie, 'content-type': 'application/octet-stream' }, body: Buffer.alloc(10) });
+  assert.equal(empty.json().text, '');
+  const bad = await app.inject({ method: 'POST', url: `/api/notes/${noteId}/listen`, headers: { cookie, 'content-type': 'application/octet-stream', 'x-audio-mime': 'text/html' }, body: Buffer.alloc(4000) });
+  assert.equal(bad.statusCode, 400);
+  const big = await app.inject({ method: 'POST', url: `/api/notes/${noteId}/listen`, headers: { cookie, 'content-type': 'application/octet-stream' }, body: Buffer.alloc(7 * 1024 * 1024) });
+  assert.equal(big.statusCode, 413);
+
+  await app.inject({ method: 'POST', url: `/api/notes/${noteId}/chat`, headers: { cookie }, payload: { question: 'Hola', mode: 'voz' } });
+  let sys = anthropic.calls.at(-1).system.map((b) => b.text).join('\n');
+  assert.match(sys, /MODO VOZ/);
+  assert.doesNotMatch(sys, /DEVOCIONAL GUIADO/);
+  await app.inject({ method: 'POST', url: `/api/notes/${noteId}/chat`, headers: { cookie }, payload: { question: 'Siento paz', mode: 'devocional', day: 2 } });
+  sys = anthropic.calls.at(-1).system.map((b) => b.text).join('\n');
+  assert.match(sys, /DEVOCIONAL GUIADO: estás acompañando a la persona en el día 2/);
+  await app.inject({ method: 'POST', url: `/api/notes/${noteId}/chat`, headers: { cookie }, payload: { question: 'Texto normal' } });
+  sys = anthropic.calls.at(-1).system.map((b) => b.text).join('\n');
+  assert.doesNotMatch(sys, /MODO VOZ/);
+});
+
 test('nota desde YouTube', async () => {
   const bad = await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie }, payload: { youtubeUrl: 'https://vimeo.com/1' } });
   assert.equal(bad.statusCode, 400);
