@@ -123,29 +123,40 @@ export function drawCard(canvas, o) {
   ctx.fillText(eyebrow, W / 2, topY);
   ctx.fillRect(W / 2 - W * 0.04, topY + W * 0.025, W * 0.08, 4);
 
-  // Frase: tamaño máximo que quepa en la caja.
-  const boxTop = topY + W * 0.09;
-  const boxBottom = H - (F.key === 'story' ? H * 0.27 : H * 0.25);
-  const boxH = boxBottom - boxTop;
+  // Frase + firma centradas entre el encabezado y el pie.
+  const sig = isVerse ? o.reference : [o.author, o.title].filter(Boolean).join('  ·  ');
+  const hasFoot = Boolean(o.logo || o.brandName || o.handle);
+  const boxTop = topY + W * 0.08;
+  const boxBottom = H - (hasFoot ? (F.key === 'story' ? H * 0.22 : H * 0.2) : H * 0.1);
+  const showQuote = !minimal && !isVerse;
   const fam = minimal ? `800 SIZEpx ${sans}` : `italic 400 SIZEpx ${serif}`;
-  let size = W * 0.11;
+  ctx.font = `600 ${W * 0.026}px ${sans}`;
+  const sigLines = sig ? wrap(ctx, isVerse ? sig : `— ${sig}`, maxW).slice(0, 2) : [];
+  const sigH = sigLines.length ? W * 0.05 + sigLines.length * W * 0.036 : 0;
+  let size = W * 0.105;
   let lines;
+  let quoteH = 0;
   for (; size > W * 0.035; size -= 2) {
     ctx.font = fam.replace('SIZE', size);
     lines = wrap(ctx, text, maxW);
-    if (lines.length * size * 1.28 <= boxH) break;
+    quoteH = showQuote ? size * 1.15 : minimal ? size * 0.7 : 0;
+    if (quoteH + lines.length * size * 1.28 + sigH <= boxBottom - boxTop) break;
   }
   const lh = size * 1.28;
-  const blockH = lines.length * lh;
-  let y = boxTop + (boxH - blockH) / 2 + size * 0.95;
-  if (!minimal && !isVerse) {
+  const total = quoteH + lines.length * lh + sigH;
+  let y = boxTop + (boxBottom - boxTop - total) / 2;
+  if (showQuote) {
     ctx.fillStyle = S.accent;
     ctx.globalAlpha = 0.9;
-    ctx.font = `400 ${size * 2.1}px ${serif}`;
-    ctx.fillText('“', W / 2, y - size * 0.75);
+    ctx.font = `400 ${size * 2.2}px ${serif}`;
+    ctx.fillText('“', W / 2, y + size * 1.55);
     ctx.globalAlpha = 1;
-    y += size * 0.35;
   }
+  if (minimal) {
+    ctx.fillStyle = S.accent;
+    ctx.fillRect(pad, y + size * 0.1, W * 0.12, 10);
+  }
+  y += quoteH + size * 0.95;
   ctx.fillStyle = S.text;
   ctx.font = fam.replace('SIZE', size);
   if (minimal) ctx.textAlign = 'left';
@@ -154,18 +165,10 @@ export function drawCard(canvas, o) {
     y += lh;
   }
   ctx.textAlign = 'center';
-  if (minimal) {
-    ctx.fillStyle = S.accent;
-    ctx.fillRect(pad, boxTop + (boxH - blockH) / 2 - size * 0.6, W * 0.12, 10);
-  }
-
-  // Firma: cita bíblica o predicador.
-  const sig = isVerse ? o.reference : [o.author, o.title].filter(Boolean).join('  ·  ');
-  if (sig) {
+  if (sigLines.length) {
     ctx.fillStyle = isVerse ? S.accent : S.soft;
-    ctx.font = `${isVerse ? 800 : 600} ${W * (isVerse ? 0.034 : 0.026)}px ${sans}`;
-    const sl = wrap(ctx, isVerse ? sig : `— ${sig}`, maxW);
-    sl.slice(0, 2).forEach((l, i) => ctx.fillText(l, W / 2, y + W * 0.04 + i * W * 0.036));
+    ctx.font = `${isVerse ? 800 : 600} ${W * (isVerse ? 0.032 : 0.026)}px ${sans}`;
+    sigLines.forEach((l, i) => ctx.fillText(l, W / 2, y - lh + size * 0.3 + W * 0.05 + i * W * 0.036));
   }
 
   // Pie: logo + nombre del negocio / redes.
