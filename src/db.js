@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   last_daily TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`);
+  // Notas creadas desde una idea central: parámetros con que se escribieron.
+  if (!cols('notes').includes('idea_json')) db.exec("ALTER TABLE notes ADD COLUMN idea_json TEXT NOT NULL DEFAULT ''");
   // Perfil y plan de cada cuenta.
   if (!cols('users').includes('display_name')) db.exec("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
   if (!cols('users').includes('plan')) db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'familia'");

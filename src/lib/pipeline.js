@@ -3,7 +3,7 @@ import path from 'node:path';
 import { audioDir } from '../config.js';
 import { indexNote } from '../db.js';
 import * as media from './media.js';
-import { bookCode, formatRef, getPassage } from './bible.js';
+import { bookCode, formatRef, getPassage, parseRef } from './bible.js';
 import * as stt from '../providers/transcribe.js';
 import * as ai from '../providers/ai.js';
 
@@ -26,6 +26,40 @@ export function resolveVerses(db, list = []) {
     out.push({ ...v, code, reference, found: Boolean(passage), verse_start: vs, verse_end: ve });
   }
   return out;
+}
+
+const WPM = 125; // ritmo de lectura en voz alta
+
+/**
+ * Inserta el texto de la RV1909 donde el borrador dice [[Juan 3:16]].
+ * Pasajes de hasta 6 versículos se citan completos; los largos quedan como "Lectura: …".
+ * Una referencia que no existe se deja como texto simple, nunca con texto inventado.
+ */
+export function expandVerseMarkers(db, text) {
+  return String(text).replace(/\[\[([^\]]{3,40})\]\]/g, (all, ref) => {
+    const r = parseRef(ref.trim());
+    const p = r && getPassage(db, r);
+    if (!p) return ref.trim();
+    if (!r.verseStart || p.verses.length > 6) return `${p.reference} (lectura)`;
+    return `«${p.verses.map((v) => v.text).join(' ')}» (${p.reference})`;
+  });
+}
+
+/** Borrador {sections:[{heading, paragraphs}]} → segmentos con tiempo de lectura estimado. */
+export function draftToSegments(db, draft) {
+  const segments = [];
+  let t = 0;
+  for (const sec of draft.sections || []) {
+    if (sec.heading?.trim()) segments.push({ start: Math.round(t), end: Math.round(t), text: sec.heading.trim(), heading: true });
+    for (const raw of sec.paragraphs || []) {
+      const text = expandVerseMarkers(db, raw).trim();
+      if (!text) continue;
+      const dur = (text.split(/\s+/).length / WPM) * 60;
+      segments.push({ start: Math.round(t), end: Math.round(t + dur), text });
+      t += dur;
+    }
+  }
+  return { segments, duration: Math.round(t) };
 }
 
 const studyInFlight = new Map();
@@ -134,10 +168,25 @@ export function createQueue(db, { log = console } = {}) {
       });
     }
 
-    const src = path.join(dir, audioFile);
-    if (!audioFile || !fs.existsSync(src)) throw new Error('No se encontró el audio de la nota.');
+    // Desde una idea: Selah escribe el manuscrito y sigue el mismo camino que una grabación.
+    if (note.source_type === 'idea' && !note.transcript_json) {
+      set(id, { status: 'writing', error: '' });
+      const idea = JSON.parse(note.idea_json || '{}');
+      const { draft, costUsd } = await deps.ai.composeFromIdea(idea);
+      const { segments, duration } = draftToSegments(db, draft);
+      if (!segments.length) throw new Error('La IA no devolvió texto. Intenta de nuevo.');
+      addCost('composition', costUsd);
+      set(id, { transcript_json: JSON.stringify({ segments }), duration_sec: duration, title: note.title || draft.title || '' });
+    }
+    if (note.source_type === 'idea') {
+      const idea = JSON.parse(note.idea_json || '{}');
+      hint = `Este texto NO es una grabación: es un manuscrito (${idea.kindLabel || 'material'}) escrito a partir de la idea central del autor: "${String(idea.idea || '').slice(0, 300)}". No hay anuncios (announcements vacío). Los tiempos son de lectura estimada. strong_quotes: las frases más fuertes del manuscrito.`;
+    }
 
-    if (!note.transcript_json) {
+    const src = path.join(dir, audioFile);
+    if (note.source_type !== 'idea' && (!audioFile || !fs.existsSync(src))) throw new Error('No se encontró el audio de la nota.');
+
+    if (!note.transcript_json && note.source_type !== 'idea') {
       set(id, { status: 'transcribing', error: '' });
       const playable = await deps.media.ensurePlayable(src, audioMime, dir, id);
       audioFile = playable.file;
@@ -181,7 +230,7 @@ export function createQueue(db, { log = console } = {}) {
     set(id, {
       analysis_json: JSON.stringify(analysis),
       title: fresh.title || analysis.title || 'Prédica sin título',
-      preacher: fresh.preacher || analysis.preacher || '',
+      preacher: fresh.source_type === 'idea' ? fresh.preacher : fresh.preacher || analysis.preacher || '',
       status: 'ready',
     });
     indexNote(db, id);

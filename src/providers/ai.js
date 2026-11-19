@@ -172,6 +172,93 @@ export async function developStudy({ segments, analysis, serviceDate }) {
   return { study: JSON.parse(text), costUsd: usageCost(msg.usage) };
 }
 
+// --- Escribir desde una idea central ------------------------------------------------
+export const IDEA_KINDS = {
+  predica: {
+    label: 'Prédica',
+    structure:
+      'Manuscrito para predicar: introducción con un gancho y el contexto; 3 o 4 puntos, cada uno con su pasaje, explicación, una ilustración breve y aplicación; conclusión con llamado a responder; oración final.',
+  },
+  estudio: {
+    label: 'Estudio bíblico',
+    words: 1800,
+    structure:
+      'Estudio para enseñar: contexto histórico y literario del pasaje base; lectura; observación (qué dice); interpretación por secciones (qué significa); conexiones con otros pasajes; aplicación (cómo se vive hoy); 4 a 6 preguntas de reflexión.',
+  },
+  consejo: {
+    label: 'Consejo pastoral',
+    words: 900,
+    structure:
+      'Consejo pastoral para una persona en esa situación: empatía y validación; lo que dice la Biblia; 3 a 5 pasos prácticos; palabras de esperanza; oración; cuándo y con quién buscar ayuda (pastor, consejero, médico).',
+  },
+  devocional: {
+    label: 'Devocional',
+    words: 520,
+    structure: 'Devocional para un día: lectura breve; reflexión cercana; aplicación para hoy; oración corta.',
+  },
+  celula: {
+    label: 'Lección para célula',
+    words: 1100,
+    structure:
+      'Lección para célula o grupo pequeño: rompehielo; lectura; enseñanza breve en 3 ideas; 5 a 7 preguntas de conversación; compromiso de la semana; oración.',
+  },
+};
+
+export const IDEA_SCHEMA = obj({
+  title: { ...str, description: 'Título corto y memorable' },
+  base_passage: obj(verseRef),
+  sections: arr(
+    obj({
+      heading: { ...str, description: 'Subtítulo de la sección (p. ej. "Introducción", "1. La tormenta llega")' },
+      paragraphs: arr({ ...str, description: 'Un párrafo de 40 a 140 palabras' }),
+    }),
+  ),
+});
+
+const IDEA_SYSTEM = `Eres un pastor y maestro bíblico hispano que escribe material para la iglesia a partir de la idea central que te da el autor.
+Reglas:
+- Desarrolla fielmente la idea del autor; es su mensaje, tú lo ayudas a escribirlo. Teología cristiana evangélica, bíblica y equilibrada.
+- Citas bíblicas: escribe SOLO la referencia entre dobles corchetes, por ejemplo [[Juan 3:16]] o [[Salmos 23:1-3]]. NUNCA escribas el texto del versículo: el sistema inserta la Reina-Valera 1909. Usa referencias reales y pertinentes, preferiblemente de 1 a 6 versículos; nunca inventes una referencia.
+- base_passage: el pasaje principal del mensaje (el que dé el autor, si da uno).
+- Ilustraciones: breves, verosímiles y genéricas. No inventes testimonios con nombres reales, estadísticas ni citas de autores.
+- Español neutro latinoamericano, cálido, claro y oral (que se pueda leer en voz alta). Sin markdown, sin emojis, sin listas con viñetas: cada idea en su párrafo.
+- Si la idea toca una crisis (suicidio, abuso, violencia, adicción), sé compasivo, no culpes, y anima con claridad a buscar ayuda inmediata con una persona de confianza, un pastor y servicios de emergencia o salud.`;
+
+/** Escribe el material completo a partir de una idea central. */
+export async function composeFromIdea({ idea, kind = 'predica', audience = '', minutes = 30, passage = '', extra = '' }) {
+  const k = IDEA_KINDS[kind] || IDEA_KINDS.predica;
+  const words = k.words || Math.round(Math.min(60, Math.max(10, minutes)) * 125);
+  const stream = getClient().beta.messages.stream({
+    model: config.ai.model,
+    max_tokens: 64000,
+    betas: [FALLBACK_BETA],
+    fallbacks: 'default',
+    output_config: { effort: config.ai.effort, format: { type: 'json_schema', schema: IDEA_SCHEMA } },
+    system: IDEA_SYSTEM,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          `Tipo: ${k.label}`,
+          `Estructura: ${k.structure}`,
+          `Extensión: unas ${words} palabras en total${kind === 'predica' ? ` (para unos ${minutes} minutos)` : ''}.`,
+          `Público: ${audience || 'congregación general'}`,
+          passage ? `Pasaje base indicado por el autor: ${passage}` : 'Pasaje base: elige el más adecuado.',
+          extra ? `Indicaciones del autor: ${extra}` : '',
+          '',
+          `<idea_central>\n${idea}\n</idea_central>`,
+        ]
+          .filter((l) => l !== null)
+          .join('\n'),
+      },
+    ],
+  });
+  const msg = await stream.finalMessage();
+  assertOk(msg);
+  const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  return { draft: JSON.parse(text), costUsd: usageCost(msg.usage) };
+}
+
 const CHAT_SYSTEM = `Eres Selah, un compañero de estudio. Respondes preguntas sobre UNA prédica usando su transcripción y notas.
 - Responde en español, breve y cálido (máximo 180 palabras salvo que pidan más).
 - Basa tus respuestas en la prédica. Si algo no se dijo, dilo con honestidad y ofrece una reflexión bíblica general marcada como tal.

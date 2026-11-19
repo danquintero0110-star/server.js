@@ -13,7 +13,7 @@ import { accessOf, isBillable } from './lib/billing.js';
 import { BIBLE_VERSION, getPassage, parseRef } from './lib/bible.js';
 import * as exp from './lib/exporters.js';
 import { youtubeId } from './lib/media.js';
-import { chatAboutNote } from './providers/ai.js';
+import { chatAboutNote, IDEA_KINDS } from './providers/ai.js';
 import { deps as pipelineDeps, ensureFocus, ensureStudy, focusKey } from './lib/pipeline.js';
 import { availableProvider } from './providers/transcribe.js';
 import * as tts from './providers/tts.js';
@@ -48,6 +48,7 @@ function serializeNote(n, { full = false } = {}) {
   return {
     ...base,
     hasAudio: Boolean(n.audio_file),
+    idea: n.idea_json ? (({ idea, kind, kindLabel, audience, minutes, passage, extra }) => ({ idea, kind, kindLabel, audience, minutes, passage, extra }))(JSON.parse(n.idea_json)) : null,
     provider: n.provider,
     cost: JSON.parse(n.cost_json || '{}'),
     transcript: n.transcript_json ? JSON.parse(n.transcript_json).segments : [],
@@ -92,9 +93,9 @@ export function buildApp({ db, queue, logger = false, push = null }) {
   const ownFolder = (fid, uid) => (fid ? db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(fid, uid)?.id || null : null);
   function createNote(req, n) {
     db.prepare(
-      `INSERT INTO notes (id, user_id, title, preacher, preached_at, folder_id, source_type, source_url, audio_file, audio_mime, status)
-       VALUES (@id, @user_id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, 'queued')`,
-    ).run({ ...n, user_id: req.user.id, folder_id: ownFolder(n.folder_id, req.user.id) });
+      `INSERT INTO notes (id, user_id, title, preacher, preached_at, folder_id, source_type, source_url, audio_file, audio_mime, idea_json, status)
+       VALUES (@id, @user_id, @title, @preacher, @preached_at, @folder_id, @sourceType, @sourceUrl, @audioFile, @audioMime, @ideaJson, 'queued')`,
+    ).run({ ideaJson: '', ...n, user_id: req.user.id, folder_id: ownFolder(n.folder_id, req.user.id) });
     indexNote(db, n.id);
     Promise.resolve(queue.enqueue(n.id)).catch((e) => req.log.error(e));
     return full(getNote(n.id, req.user.id), req.user.id);
@@ -314,6 +315,26 @@ export function buildApp({ db, queue, logger = false, push = null }) {
       }
       if (!audioFile) return reply.code(400).send({ error: 'Falta el audio' });
       sourceType ||= 'upload';
+    } else if (req.body?.idea !== undefined) {
+      // Desde una idea central: Selah escribe prédica, estudio, consejo, devocional o lección.
+      const b = req.body;
+      const idea = String(b.idea || '').trim();
+      if (idea.length < 8) return reply.code(400).send({ error: 'Escribe tu idea central con un poco más de detalle' });
+      if (idea.length > 2000) return reply.code(400).send({ error: 'La idea es muy larga (máximo 2000 caracteres)' });
+      const kind = IDEA_KINDS[b.kind] ? b.kind : 'predica';
+      const ideaJson = JSON.stringify({
+        idea,
+        kind,
+        kindLabel: IDEA_KINDS[kind].label,
+        audience: String(b.audience || '').trim().slice(0, 80),
+        minutes: Math.min(60, Math.max(10, Number(b.minutes) || 30)),
+        passage: String(b.passage || '').trim().slice(0, 80),
+        extra: String(b.extra || '').trim().slice(0, 500),
+      });
+      fields.title = String(b.title || '').slice(0, 200);
+      fields.folder_id = Number(b.folderId) || null;
+      fields.preacher = req.user.displayName || '';
+      return reply.code(201).send(createNote(req, { id, ...fields, sourceType: 'idea', sourceUrl: '', audioFile: '', audioMime: '', ideaJson }));
     } else {
       const b = req.body || {};
       if (!youtubeId(b.youtubeUrl)) return reply.code(400).send({ error: 'Ese enlace no parece de YouTube' });

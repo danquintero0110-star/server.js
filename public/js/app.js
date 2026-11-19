@@ -116,7 +116,7 @@ function greeting() {
   return hr < 12 ? 'Buenos días' : hr < 19 ? 'Buenas tardes' : 'Buenas noches';
 }
 
-const STATUS = { queued: 'En cola', downloading: 'Descargando', transcribing: 'Transcribiendo', analyzing: 'Analizando', error: 'Error' };
+const STATUS = { queued: 'En cola', downloading: 'Descargando', transcribing: 'Transcribiendo', writing: 'Escribiendo', analyzing: 'Analizando', error: 'Error' };
 
 function noteCard(n) {
   const d = dateParts(n.preachedAt) || {};
@@ -133,7 +133,7 @@ function noteCard(n) {
     h(
       'div',
       { style: { minWidth: 0 } },
-      h('h3', {}, n.title || (n.status === 'error' ? 'Nota sin procesar' : 'Procesando prédica…')),
+      h('h3', {}, n.title || (n.status === 'error' ? 'Nota sin procesar' : n.sourceType === 'idea' ? 'Escribiendo…' : 'Procesando prédica…')),
       snippet,
       h(
         'div',
@@ -345,7 +345,7 @@ function newNoteSheet() {
       h('button', { class: 'action', onclick }, h('span', { class: 'ic' }, icon(ic)), h('span', {}, h('b', {}, title), h('small', {}, sub)), icon('chev'));
     return [
       h('h3', {}, 'Nueva nota'),
-      h('p', { class: 'muted', style: { margin: 0 } }, '¿De dónde viene la prédica?'),
+      h('p', { class: 'muted', style: { margin: 0 } }, '¿Cómo quieres empezar?'),
       h(
         'div',
         { class: 'actions' },
@@ -360,9 +360,92 @@ function newNoteSheet() {
           close();
           setTimeout(youtubeSheet, 220);
         }),
+        action('spark', 'Desde una idea', 'Prédica, estudio, consejo, devocional o célula', () => {
+          close();
+          setTimeout(ideaSheet, 220);
+        }),
       ),
       fileInput,
     ];
+  });
+}
+
+const IDEA_KINDS = [
+  ['predica', 'Prédica', 'Manuscrito listo para predicar'],
+  ['estudio', 'Estudio bíblico', 'Contexto, interpretación y preguntas'],
+  ['consejo', 'Consejo', 'Para una persona en esa situación'],
+  ['devocional', 'Devocional', 'Lectura corta para un día'],
+  ['celula', 'Célula', 'Lección con preguntas de conversación'],
+];
+const IDEA_AUDIENCES = ['General', 'Jóvenes', 'Niños', 'Matrimonios', 'Mujeres', 'Hombres', 'Líderes', 'Nuevos creyentes'];
+
+function ideaSheet() {
+  sheet((close) => {
+    let kind = 'predica';
+    let audience = 'General';
+    let minutes = 30;
+    const idea = h('textarea', { class: 'input', rows: 4, maxlength: 2000, placeholder: 'Ej. La fe no ignora la tormenta: la atraviesa con los ojos puestos en Jesús.' });
+    const passage = h('input', { class: 'input', placeholder: 'Pasaje base (opcional), p. ej. Mateo 14:22-33', maxlength: 80 });
+    const extra = h('input', { class: 'input', placeholder: 'Indicaciones (opcional): Día de las Madres, para un retiro…', maxlength: 500 });
+    const chips = (items, get, set, render) => {
+      const row = h('div', { class: 'suggest' });
+      const paint = () =>
+        row.replaceChildren(
+          ...items.map((it) => {
+            const [val, label] = Array.isArray(it) ? it : [it, render ? render(it) : it];
+            return h('button', { type: 'button', class: `chip${get() === val ? ' on' : ''}`, onclick: () => (set(val), vibrate(5), paint(), onKind()) }, label);
+          }),
+        );
+      paint();
+      return row;
+    };
+    const kindHint = h('p', { class: 'faint', style: { fontSize: '13px', margin: '6px 0 0' } });
+    const minutesField = h('div', { class: 'field' }, h('label', {}, 'Duración de la prédica'), chips([15, 25, 35, 45], () => minutes, (v) => (minutes = v), (v) => `${v} min`));
+    function onKind() {
+      kindHint.textContent = IDEA_KINDS.find((k) => k[0] === kind)[2];
+      minutesField.hidden = kind !== 'predica';
+    }
+    const btn = h('button', { class: 'btn primary block' }, icon('spark'), 'Escribir con Selah');
+    setTimeout(() => idea.focus(), 400);
+    const form = h(
+      'form',
+      {
+        class: 'stack',
+        style: { marginTop: '16px' },
+        onsubmit: async (e) => {
+          e.preventDefault();
+          if (idea.value.trim().length < 8) return toast('Escribe tu idea central con un poco más de detalle', { error: true });
+          btn.disabled = true;
+          try {
+            const n = await api.post('/api/notes', {
+              idea: idea.value,
+              kind,
+              audience: audience === 'General' ? '' : audience,
+              minutes,
+              passage: passage.value,
+              extra: extra.value,
+              folderId: folderForNew(),
+            });
+            close();
+            toast('Selah ya está escribiendo');
+            go(`/nota/${n.id}`);
+          } catch (err) {
+            toast(err.message, { error: true });
+            btn.disabled = false;
+          }
+        },
+      },
+      h('div', { class: 'field' }, h('label', {}, 'Tu idea central'), idea),
+      h('div', { class: 'field' }, h('label', {}, '¿Qué quieres que escriba?'), chips(IDEA_KINDS, () => kind, (v) => (kind = v)), kindHint),
+      minutesField,
+      h('div', { class: 'field' }, h('label', {}, '¿Para quién?'), chips(IDEA_AUDIENCES, () => audience, (v) => (audience = v))),
+      passage,
+      extra,
+      btn,
+      h('p', { class: 'faint', style: { fontSize: '12.5px', margin: 0 } }, 'Los versículos se insertan de la Reina-Valera 1909. Revisa y adapta el texto: es tu mensaje.'),
+    );
+    onKind();
+    return [h('span', { class: 'eyebrow' }, 'Desde una idea'), h('h3', {}, '¿Qué te puso Dios en el corazón?'), form];
   });
 }
 
@@ -594,7 +677,9 @@ async function noteView(id) {
   audio.preload = 'metadata';
   let poll;
   let player = null;
-  let tab = new URLSearchParams(location.search).get('t') || 'resumen';
+  let tab = new URLSearchParams(location.search).get('t') || (note.sourceType === 'idea' ? 'transcripcion' : 'resumen');
+  const isIdea = note.sourceType === 'idea';
+  const tabs = isIdea ? [['transcripcion', 'Manuscrito'], ...TABS.filter(([k]) => k !== 'transcripcion' && k !== 'anuncios')] : TABS;
   const timeListeners = new Set();
   audio.addEventListener('timeupdate', () => timeListeners.forEach((f) => f(audio.currentTime)));
 
@@ -629,7 +714,7 @@ async function noteView(id) {
       'section',
       { class: 'hero stagger' },
       h('span', { class: 'eyebrow' }, [longDate(note.preachedAt), note.preacher].filter(Boolean).join(' · ') || 'Prédica'),
-      h('h1', {}, note.title || (note.status === 'error' ? 'Nota sin procesar' : 'Procesando prédica…')),
+      h('h1', {}, note.title || (note.status === 'error' ? 'Nota sin procesar' : note.sourceType === 'idea' ? 'Escribiendo…' : 'Procesando prédica…')),
       note.analysis?.central_idea ? h('p', { class: 'idea' }, note.analysis.central_idea) : null,
       h(
         'div',
@@ -639,18 +724,26 @@ async function noteView(id) {
         note.isMine === false ? h('span', { class: 'shared-tag' }, icon('users'), `Compartida por ${note.ownerName}`) : null,
         note.isMine && note.shares?.length ? h('span', { class: 'shared-tag' }, icon('users'), note.shares.map((g) => g.name).join(', ')) : null,
         note.sourceType === 'youtube' ? h('a', { href: note.sourceUrl, target: '_blank', rel: 'noopener' }, 'Ver en YouTube') : null,
+        note.sourceType === 'idea' ? h('span', { class: 'shared-tag' }, icon('spark'), `${note.idea?.kindLabel || 'Escrito'} con Selah`) : null,
       ),
     );
   }
 
   function processing() {
-    const order = ['queued', 'downloading', 'transcribing', 'analyzing', 'ready'];
-    const steps = [
-      ...(note.sourceType === 'youtube' ? [['downloading', 'Descargando de YouTube', 'Obteniendo solo el audio']] : [['queued', 'Audio recibido', 'Guardado de forma segura']]),
-      ['transcribing', 'Transcribiendo', 'Palabra por palabra, con tiempos'],
-      ['analyzing', 'Meditando el mensaje', 'Resumen, versículos, anuncios y más'],
-      ['ready', 'Listo', ''],
-    ];
+    const order = ['queued', 'downloading', 'transcribing', 'writing', 'analyzing', 'ready'];
+    const steps = isIdea
+      ? [
+          ['queued', 'Idea recibida', note.idea?.idea ? `“${note.idea.idea.slice(0, 90)}${note.idea.idea.length > 90 ? '…' : ''}”` : ''],
+          ['writing', `Escribiendo tu ${(note.idea?.kindLabel || 'mensaje').toLowerCase()}`, 'Con versículos de la Reina-Valera 1909'],
+          ['analyzing', 'Preparando todo lo demás', 'Resumen, preguntas, devocional y frases'],
+          ['ready', 'Listo', ''],
+        ]
+      : [
+          ...(note.sourceType === 'youtube' ? [['downloading', 'Descargando de YouTube', 'Obteniendo solo el audio']] : [['queued', 'Audio recibido', 'Guardado de forma segura']]),
+          ['transcribing', 'Transcribiendo', 'Palabra por palabra, con tiempos'],
+          ['analyzing', 'Meditando el mensaje', 'Resumen, versículos, anuncios y más'],
+          ['ready', 'Listo', ''],
+        ];
     const cur = order.indexOf(note.status);
     if (note.status === 'error') {
       return h(
@@ -662,7 +755,7 @@ async function noteView(id) {
           'div',
           { style: { display: 'flex', gap: '10px', marginTop: '10px', flexWrap: 'wrap' } },
           h('button', { class: 'btn primary', onclick: () => reprocess(false) }, icon('refresh'), 'Reintentar'),
-          h('button', { class: 'btn', onclick: () => reprocess(true) }, 'Transcribir de nuevo'),
+          h('button', { class: 'btn', onclick: () => reprocess(true) }, isIdea ? 'Escribir de nuevo' : 'Transcribir de nuevo'),
         ),
       );
     }
@@ -674,7 +767,7 @@ async function noteView(id) {
         const cls = i < cur || (key === 'queued' && cur > 0) ? 'done' : i === cur || (key === 'queued' && cur === 0) ? 'active' : '';
         return h('div', { class: `step ${cls}` }, h('i'), h('div', {}, h('b', {}, title), sub ? h('small', {}, sub) : null));
       }),
-      h('p', { class: 'faint', style: { fontSize: '13px', margin: '18px 0 0' } }, 'Una prédica de 45 minutos tarda unos 2 a 4 minutos. Puedes salir; te espera aquí.'),
+      h('p', { class: 'faint', style: { fontSize: '13px', margin: '18px 0 0' } }, isIdea ? 'Tarda unos 2 a 4 minutos. Puedes salir; te espera aquí.' : 'Una prédica de 45 minutos tarda unos 2 a 4 minutos. Puedes salir; te espera aquí.'),
     );
   }
 
@@ -712,7 +805,7 @@ async function noteView(id) {
       'nav',
       { class: 'tabs', role: 'tablist' },
       indicator,
-      TABS.map(([key, label]) =>
+      tabs.map(([key, label]) =>
         h(
           'button',
           {
@@ -762,7 +855,7 @@ async function noteView(id) {
     return panel;
   }
 
-  const tsChip = (sec) => (sec || sec === 0 ? h('button', { class: 'ts', onclick: () => seek(sec) }, icon('play'), mmss(sec)) : null);
+  const tsChip = (sec) => (note.hasAudio && (sec || sec === 0) ? h('button', { class: 'ts', onclick: () => seek(sec) }, icon('play'), mmss(sec)) : null);
   const title = (text, extra) => h('div', { class: 'section-title' }, h('span', { class: 'eyebrow' }, text), extra || null);
   const a = () => note.analysis;
 
@@ -919,7 +1012,7 @@ async function noteView(id) {
       h('span', { class: 'eyebrow' }, state.bible?.name || 'Reina-Valera 1909'),
       h('h3', {}, v.reference),
       body,
-      v.timestamp_sec != null
+      v.timestamp_sec != null && note.hasAudio
         ? h('button', { class: 'btn block', style: { marginTop: '18px' }, onclick: () => seek(v.timestamp_sec) }, icon('play'), `Escuchar en ${mmss(v.timestamp_sec)}`)
         : null,
     ]);
@@ -1064,7 +1157,31 @@ async function noteView(id) {
     ];
   }
 
+  function manuscrito() {
+    const words = note.transcript.filter((s) => !s.heading).reduce((n, s) => n + s.text.split(/\s+/).length, 0);
+    const plain = [note.title, '', ...note.transcript.map((s) => (s.heading ? `\n${s.text.toUpperCase()}` : s.text))].join('\n').replace(/\n{3,}/g, '\n\n');
+    const body = h('article', { class: 'manuscript' });
+    for (const s of note.transcript) body.append(s.heading ? h('h4', {}, s.text) : h('p', {}, s.text));
+    return [
+      title(`${note.idea?.kindLabel || 'Manuscrito'} · ${Math.max(1, Math.round(note.durationSec / 60))} min de lectura`, h('span', { class: 'faint', style: { fontSize: '12px' } }, `${words} palabras`)),
+      note.idea?.idea ? h('p', { class: 'manuscript-idea' }, h('span', { class: 'eyebrow' }, 'Tu idea'), h('br'), note.idea.idea) : null,
+      body,
+      h(
+        'div',
+        { class: 'export-row' },
+        h('button', { class: 'btn', onclick: () => copyText(plain, 'Texto copiado') }, icon('copy'), 'Copiar texto'),
+        h('button', { class: 'btn primary', onclick: () => shareText(plain, note.title) }, icon('share'), 'Compartir'),
+      ),
+      h('button', { class: 'btn small ghost', style: { marginTop: '10px' }, onclick: async () => {
+        if (!confirm('¿Escribirlo de nuevo con la misma idea? Se reemplaza este texto y todo lo generado.')) return;
+        await reprocess(true);
+      } }, icon('refresh'), 'Escribir otra versión'),
+      h('p', { class: 'faint', style: { fontSize: '12.5px' } }, 'Versículos: Reina-Valera 1909 (dominio público). Revisa y adapta el texto antes de usarlo.'),
+    ];
+  }
+
   function transcripcion() {
+    if (isIdea) return manuscrito();
     const sections = a().sections || [];
     const LABEL = { predica: 'Prédica', anuncios: 'Anuncios', alabanza: 'Alabanza', oracion: 'Oración', otro: 'Otro' };
     const segEls = [];

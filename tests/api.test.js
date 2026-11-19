@@ -615,3 +615,49 @@ test('cuentas: editar, pausar por falta de pago y eliminar', async () => {
   assert.ok(!fs.readdirSync(path.join(dataDir, 'audio')).some((f) => f.startsWith(note.id)), 'se borraron sus audios');
   assert.ok(!(await app.inject({ url: '/api/admin/users', headers: { cookie } })).json().some((u) => u.id === c.id));
 });
+
+test('desde una idea: Selah escribe, inserta la RV1909 y analiza como una prédica', async () => {
+  const bad = await app.inject({ method: 'POST', url: '/api/notes', headers: { cookie }, payload: { idea: 'fe' } });
+  assert.equal(bad.statusCode, 400);
+  const before = anthropic.calls.length;
+  const r = await app.inject({
+    method: 'POST',
+    url: '/api/notes',
+    headers: { cookie },
+    payload: { idea: 'La fe no ignora la tormenta: la atraviesa con los ojos en Jesús.', kind: 'predica', minutes: 25, audience: 'Jóvenes', passage: 'Mateo 14:22-33', extra: 'Para un retiro' },
+  });
+  assert.equal(r.statusCode, 201, r.body);
+  assert.equal(r.json().sourceType, 'idea');
+  const n = await waitReady(r.json().id);
+  assert.equal(n.status, 'ready', n.error);
+  assert.equal(n.title, 'Fe en medio de la tormenta');
+  assert.equal(n.hasAudio, false);
+  assert.equal(n.idea.kindLabel, 'Prédica');
+  // El modelo recibió la idea y los parámetros.
+  const call = anthropic.calls[before];
+  assert.match(call.messages[0].content, /La fe no ignora la tormenta/);
+  assert.match(call.messages[0].content, /Público: Jóvenes/);
+  assert.match(call.messages[0].content, /25 minutos/);
+  assert.match(call.messages[0].content, /Mateo 14:22-33/);
+  // Manuscrito: títulos de sección y versículos con texto real de la RV1909.
+  const text = n.transcript.map((s) => s.text).join('\n');
+  assert.ok(n.transcript.some((s) => s.heading && s.text === '1. Jesús llama'));
+  assert.match(text, /«Y él dijo: Ven\..*» \(Mateo 14:29-31\)/);
+  assert.match(text, /de tal manera amó Dios al mundo.*\(Juan 3:16\)/);
+  assert.match(text, /Salmos 119:1-40 \(lectura\)/, 'pasajes largos no se pegan completos');
+  assert.match(text, /queda como texto: Mateo 99:1\./, 'referencia inexistente sin texto inventado');
+  assert.doesNotMatch(text, /\[\[/);
+  assert.ok(n.durationSec > 0, 'tiempo de lectura estimado');
+  // Luego pasa por el mismo análisis: versículos, devocional, etc.
+  const analysisCall = anthropic.calls[before + 1];
+  assert.match(analysisCall.messages[0].content, /NO es una grabación/);
+  assert.ok(n.analysis.verses.length > 0);
+  assert.equal(n.analysis.devotional.length, 5);
+  assert.ok(n.cost.composition > 0 && n.cost.analysis > 0);
+  // Funciona el PDF y el texto para WhatsApp; el audio no existe.
+  assert.equal((await app.inject({ url: `/api/notes/${n.id}/export.pdf`, headers: { cookie } })).statusCode, 200);
+  assert.equal((await app.inject({ url: `/api/notes/${n.id}/audio`, headers: { cookie } })).statusCode, 404);
+  // "Escribir de nuevo" vuelve a redactar.
+  await app.inject({ method: 'POST', url: `/api/notes/${n.id}/reprocess`, headers: { cookie }, payload: { transcribe: true } });
+  assert.equal((await waitReady(n.id)).status, 'ready');
+});

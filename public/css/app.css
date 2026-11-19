@@ -618,3 +618,12 @@ textarea.input { height: auto; padding: 14px 18px; resize: none; }
 .banner.plan-blocked svg { color: var(--rose); }
 .row-item .status { margin-top: 6px; }
 .check.toggle input:checked + span { color: var(--text); text-decoration: none; }
+
+/* Desde una idea: manuscrito */
+.manuscript { margin-top: 6px; }
+.manuscript h4 { font: 500 22px/1.25 var(--serif); margin: 26px 0 10px; color: var(--text); letter-spacing: -0.01em; }
+.manuscript h4:first-child { margin-top: 4px; }
+.manuscript p { font: 400 18px/1.7 var(--serif); color: var(--text-2); margin: 0 0 14px; }
+.manuscript-idea { margin: 4px 0 18px; padding: 14px 16px; border-radius: 16px; background: var(--glow); font: 400 italic 17px/1.5 var(--serif); }
+.manuscript-idea .eyebrow { font-style: normal; }
+.chip.on { background: var(--text); color: var(--bg); border-color: transparent; }

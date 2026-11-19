@@ -84,7 +84,17 @@ export const SAMPLE_FOCUS = {
   phrase: 'Tu trabajo también es altar.',
 };
 
-export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY, focus = SAMPLE_FOCUS, chatText = 'Según la prédica [2:30], Pedro se hundió al mirar el viento.' } = {}) {
+export const SAMPLE_DRAFT = {
+  title: 'Fe en medio de la tormenta',
+  base_passage: { book: 'Mateo', chapter: 14, verse_start: 22, verse_end: 33 },
+  sections: [
+    { heading: 'Introducción', paragraphs: ['Todos hemos vivido tormentas. Leamos [[Mateo 14:29-31]] y veamos qué hizo Pedro.'] },
+    { heading: '1. Jesús llama', paragraphs: ['Jesús nos llama a salir de la barca, como dice [[Juan 3:16]].', 'Un pasaje largo se lee completo: [[Salmos 119:1-40]]. Y uno inventado queda como texto: [[Mateo 99:1]].'] },
+    { heading: 'Oración', paragraphs: ['Señor, ayúdanos a mirarte en la tormenta. Amén.'] },
+  ],
+};
+
+export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY, focus = SAMPLE_FOCUS, draft = SAMPLE_DRAFT, chatText = 'Según la prédica [2:30], Pedro se hundió al mirar el viento.' } = {}) {
   const calls = [];
   return {
     calls,
@@ -95,7 +105,8 @@ export function fakeAnthropic({ analysis = SAMPLE_ANALYSIS, study = SAMPLE_STUDY
           const isAnalysis = Boolean(params.output_config?.format);
           const isStudy = Boolean(params.output_config?.format?.schema?.properties?.introduction);
           const isFocus = Boolean(params.output_config?.format?.schema?.properties?.phrase);
-          const text = isFocus ? JSON.stringify(focus) : isStudy ? JSON.stringify(study) : isAnalysis ? JSON.stringify(analysis) : chatText;
+          const isIdea = Boolean(params.output_config?.format?.schema?.properties?.base_passage);
+          const text = isIdea ? JSON.stringify(draft) : isFocus ? JSON.stringify(focus) : isStudy ? JSON.stringify(study) : isAnalysis ? JSON.stringify(analysis) : chatText;
           const listeners = {};
           return {
             on(ev, fn) {
